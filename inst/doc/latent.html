@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+<meta name="date" content="2026-10-27" />
+
+<title>Latent projection predictive feature selection</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+<script>// Hide empty <a> tag within highlighted CodeBlock for screen reader accessibility (see https://github.com/jgm/pandoc/issues/6352#issuecomment-626106786) -->
+// v0.0.1
+// Written by JooYoung Seo (jooyoung@psu.edu) and Atsushi Yasumoto on June 1st, 2020.
+
+document.addEventListener('DOMContentLoaded', function() {
+  const codeList = document.getElementsByClassName("sourceCode");
+  for (var i = 0; i < codeList.length; i++) {
+    var linkList = codeList[i].getElementsByTagName('a');
+    for (var j = 0; j < linkList.length; j++) {
+      if (linkList[j].innerHTML === "") {
+        linkList[j].setAttribute('aria-hidden', 'true');
+      }
+    }
+  }
+});
+</script>
+
+<style type="text/css">
+  code{white-space: pre-wrap;}
+  span.smallcaps{font-variant: small-caps;}
+  span.underline{text-decoration: underline;}
+  div.column{display: inline-block; vertical-align: top; width: 50%;}
+  div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+  ul.task-list{list-style: none;}
+    </style>
+
+
+
+<style type="text/css">
+  code {
+    white-space: pre;
+  }
+  .sourceCode {
+    overflow: visible;
+  }
+</style>
+<style type="text/css" data-origin="pandoc">
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+    color: #aaaaaa;
+  }
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+code span.at { color: #7d9029; } /* Attribute */
+code span.bn { color: #40a070; } /* BaseN */
+code span.bu { } /* BuiltIn */
+code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+code span.ch { color: #4070a0; } /* Char */
+code span.cn { color: #880000; } /* Constant */
+code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+code span.dt { color: #902000; } /* DataType */
+code span.dv { color: #40a070; } /* DecVal */
+code span.er { color: #ff0000; font-weight: bold; } /* Error */
+code span.ex { } /* Extension */
+code span.fl { color: #40a070; } /* Float */
+code span.fu { color: #06287e; } /* Function */
+code span.im { } /* Import */
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+code span.op { color: #666666; } /* Operator */
+code span.ot { color: #007020; } /* Other */
+code span.pp { color: #bc7a00; } /* Preprocessor */
+code span.sc { color: #4070a0; } /* SpecialChar */
+code span.ss { color: #bb6688; } /* SpecialString */
+code span.st { color: #4070a0; } /* String */
+code span.va { color: #19177c; } /* Variable */
+code span.vs { color: #4070a0; } /* VerbatimString */
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Latent projection predictive feature selection</h1>
+<h4 class="date">2026-10-27</h4>
+
+
+<div id="TOC">
+<ul>
+<li><a href="#introduction">Introduction</a>
+<ul>
+<li><a href="#general-idea">General idea</a></li>
+<li><a href="#impl">Implementation</a></li>
+</ul></li>
+<li><a href="#example-poisson-distribution">Example: Poisson distribution</a>
+<ul>
+<li><a href="#data">Data</a></li>
+<li><a href="#reference-model">Reference model</a></li>
+<li><a href="#variable-selection-using-the-latent-projection">Variable selection using the latent projection</a></li>
+<li><a href="#variable-selection-using-the-traditional-projection">Variable selection using the traditional projection</a></li>
+<li><a href="#conclusion">Conclusion</a></li>
+</ul></li>
+<li><a href="#negbinex">Example: Negative binomial distribution</a>
+<ul>
+<li><a href="#data-1">Data</a></li>
+<li><a href="#reference-model-1">Reference model</a></li>
+<li><a href="#variable-selection-using-the-latent-projection-1">Variable selection using the latent projection</a></li>
+<li><a href="#conclusion-1">Conclusion</a></li>
+</ul></li>
+<li><a href="#cens">Censored observations (survival analysis)</a>
+<ul>
+<li><a href="#weibullcensex">Example: Weibull distribution with right-censored observations</a></li>
+<li><a href="#lognormalcensex">Example: Log-normal distribution with right-censored observations</a></li>
+</ul></li>
+<li><a href="#references">References</a></li>
+</ul>
+</div>
+
+<div id="introduction" class="section level2">
+<h2>Introduction</h2>
+<p>This vignette shows how to use the latent projection predictive feature selection from <span class="citation">Catalina, Bürkner, and Vehtari (<a href="#ref-catalina_latent_2021" role="doc-biblioref">2021</a>)</span> in <strong>projpred</strong>. We recommend to read the <a href="https://mc-stan.org/projpred/articles/projpred.html">main vignette</a> first, as the latent-projection vignette presented here will skip some of the details explained in the main vignette.</p>
+<div id="general-idea" class="section level3">
+<h3>General idea</h3>
+<p>The response families used in GLMs <span class="citation">(McCullagh and Nelder <a href="#ref-mccullagh_generalized_1989" role="doc-biblioref">1989</a>, chap. 2)</span>, GLMMs, GAMs, and GAMMs (in particular, the <code>gaussian()</code>, the <code>binomial()</code>, and the <code>poisson()</code> family which are supported by <strong>projpred</strong>’s traditional projection) may be termed <em>exponential dispersion (ED)</em> families <span class="citation">(Jørgensen <a href="#ref-jorgensen_exponential_1987" role="doc-biblioref">1987</a>)</span><a href="#fn1" class="footnote-ref" id="fnref1"><sup>1</sup></a>. For a response family that is not an ED family, the Kullback-Leibler (KL) divergence minimization problem <span class="citation">(see Piironen, Paasiniemi, and Vehtari <a href="#ref-piironen_projective_2020" role="doc-biblioref">2020</a>)</span> is often not easy to solve analytically (exceptions are non-ED families that are discrete and have finite support; see the comment on the augmented-data projection in section <a href="#impl">“Implementation”</a>). In order to bypass this issue, the latent projection <span class="citation">(Catalina, Bürkner, and Vehtari <a href="#ref-catalina_latent_2021" role="doc-biblioref">2021</a>)</span> solves the KL minimization problem in the predictive space of the latent predictors<a href="#fn2" class="footnote-ref" id="fnref2"><sup>2</sup></a> instead of in the predictive space of the original response values.</p>
+<p>To this end, the latent predictor is assumed to have a Gaussian distribution, since it (i) constitutes a combination of predictor data and regression parameters which is often linear (in the parameters, but—less—often also in the predictor data) or at least additive (across the predictor terms) and (ii) has the complete real line as support. Furthermore, the Gaussian distribution has the highest differential entropy among all distributions with two finite moments and with the real line as support <span class="citation">(see, e.g., Cover and Thomas <a href="#ref-cover_elements_1991" role="doc-biblioref">1991</a>)</span>. In some cases, e.g., for the probit link, the Gaussian distribution is even part of the original statistical model. In case of the logit link, the Gaussian distribution with a standard deviation of 1.6 approximates the logistic distribution (with a scale parameter of 1).</p>
+<p>The assumption of a Gaussian distribution for the latent predictors makes things a lot easier because it allows us to make use of <strong>projpred</strong>’s traditional projection.</p>
+<p>As illustrated by the Poisson example below, the latent projection can not only be used for families not supported by <strong>projpred</strong>’s traditional projection, but it can also be beneficial for families supported by it. The remaining examples show that the latent projection offers support for models (and censored observations) that the traditional (or augmented-data) projection do not support.</p>
+</div>
+<div id="impl" class="section level3">
+<h3>Implementation</h3>
+<p>To use the latent projection in <strong>projpred</strong>, argument <code>latent</code> of <code>extend_family()</code> needs to be set to <code>TRUE</code>. Since <code>extend_family()</code> is called by <code>init_refmodel()</code> which in turn is called by <code>get_refmodel()</code> (more precisely, by the <code>get_refmodel()</code> methods) which in turn is called at the beginning of the top-level functions <code>project()</code>, <code>varsel()</code>, and <code>cv_varsel()</code>, it is possible to pass <code>latent = TRUE</code> from such a top-level function down to <code>extend_family()</code> via the ellipsis (<code>...</code>). However, we recommend to define the reference model object of class <code>refmodel</code> explicitly (as illustrated in the examples below) to avoid repetitive and inefficient code<a href="#fn3" class="footnote-ref" id="fnref3"><sup>3</sup></a>.</p>
+<p>After performing the projection (either as a stand-alone feature via <code>project()</code> or embedded in a variable selection via <code>varsel()</code> or <code>cv_varsel()</code>), the post-processing (e.g., the estimation of the performance statistics in <code>summary.vsel()</code>) can be performed on the original response scale. For this, there are three arguments of <code>extend_family()</code> which accept R functions: <code>latent_ilink</code> (responsible for the inverse-link transformation from latent scale to response scale), <code>latent_ll_oscale</code> (responsible for the calculation of log-likelihood values on response scale), and <code>latent_ppd_oscale</code> (responsible for drawing from the (posterior-projection) predictive distribution on response scale). For some families, these three arguments have internal defaults implemented natively in <strong>projpred</strong>. These families are listed in the main vignette (section <a href="https://mc-stan.org/projpred/articles/projpred.html#modtypes">“Supported types of models”</a>). For all other families, <strong>projpred</strong> either tries to infer a reasonable function internally (in case of <code>latent_ilink</code>) or uses a dummy function returning only <code>NA</code>s (in case of <code>latent_ll_oscale</code> and <code>latent_ppd_oscale</code>), unless the user supplies custom functions. When creating a reference model object for a family that lacks <strong>projpred</strong>’s native support for full response-scale post-processing, <strong>projpred</strong> will throw messages stating whether (and which) features will be unavailable unless at least some of these three arguments are provided by the user. Again, the ellipsis (<code>...</code>) can be used to pass these arguments from a top-level function such as <code>cv_varsel()</code> down to <code>extend_family()</code>. In the post-processing functions, response-scale analyses can usually be deactivated by setting argument <code>resp_oscale</code> to <code>FALSE</code>, with the exception of <code>predict.refmodel()</code> and <code>proj_linpred()</code> where arguments <code>type</code> and <code>transform</code> serve this purpose (see the documentation).</p>
+<p>Apart from the arguments mentioned above, <code>extend_family()</code> also features the latent-projection argument <code>latent_y_unqs</code> whose purpose is described in the documentation.</p>
+<p>While the latent projection is an approximate solution to the KL divergence minimization problem in the original response space<a href="#fn4" class="footnote-ref" id="fnref4"><sup>4</sup></a>, the augmented-data projection <span class="citation">(Weber, Glass, and Vehtari <a href="#ref-weber_projection_2025" role="doc-biblioref">2025</a>)</span> gives the exact<a href="#fn5" class="footnote-ref" id="fnref5"><sup>5</sup></a> solution for some non-ED families, namely those where the response distribution has finite support. However, the augmented-data projection comes with a higher runtime than the latent projection. The families currently supported by <strong>projpred</strong>’s augmented-data projection are also listed in the main vignette (again section <a href="https://mc-stan.org/projpred/articles/projpred.html#modtypes">“Supported types of models”</a>).</p>
+</div>
+</div>
+<div id="example-poisson-distribution" class="section level2">
+<h2>Example: Poisson distribution</h2>
+<p>In this example, we will illustrate that in case of a family supported by <strong>projpred</strong>’s traditional projection (here the <code>poisson()</code> family), the latent projection can improve runtime and results of the variable selection compared to <strong>projpred</strong>’s traditional projection, at least if the L1 search is used (see argument <code>method</code> of <code>varsel()</code> and <code>cv_varsel()</code>).</p>
+<div id="data" class="section level3">
+<h3>Data</h3>
+<p>First, we generate a training and a test dataset with a Poisson-distributed response:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="co"># Number of observations in the training dataset (= number of observations in</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a><span class="co"># the test dataset):</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a>N &lt;-<span class="st"> </span><span class="dv">71</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a><span class="co"># Data-generating function:</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true"></a>sim_poiss &lt;-<span class="st"> </span><span class="cf">function</span>(<span class="dt">nobs =</span> <span class="dv">2</span> <span class="op">*</span><span class="st"> </span>N, <span class="dt">ncon =</span> <span class="dv">10</span>, <span class="dt">ncats =</span> <span class="dv">4</span>, <span class="dt">nnoise =</span> <span class="dv">39</span>) {</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true"></a>  <span class="co"># Regression coefficients for continuous predictors:</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true"></a>  coefs_con &lt;-<span class="st"> </span><span class="kw">rnorm</span>(ncon)</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true"></a>  <span class="co"># Continuous predictors:</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true"></a>  dat_sim &lt;-<span class="st"> </span><span class="kw">matrix</span>(<span class="kw">rnorm</span>(nobs <span class="op">*</span><span class="st"> </span>ncon), <span class="dt">ncol =</span> ncon)</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true"></a>  <span class="co"># Start linear predictor:</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true"></a>  linpred &lt;-<span class="st"> </span><span class="fl">2.1</span> <span class="op">+</span><span class="st"> </span>dat_sim <span class="op">%*%</span><span class="st"> </span>coefs_con</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true"></a>  </span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true"></a>  <span class="co"># Categorical predictor:</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true"></a>  dat_sim &lt;-<span class="st"> </span><span class="kw">data.frame</span>(</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true"></a>    <span class="dt">x =</span> dat_sim,</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true"></a>    <span class="dt">xcat =</span> <span class="kw">gl</span>(<span class="dt">n =</span> ncats, <span class="dt">k =</span> nobs <span class="op">%/%</span><span class="st"> </span>ncats, <span class="dt">length =</span> nobs,</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true"></a>              <span class="dt">labels =</span> <span class="kw">paste0</span>(<span class="st">&quot;cat&quot;</span>, <span class="kw">seq_len</span>(ncats)))</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true"></a>  )</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true"></a>  <span class="co"># Regression coefficients for the categorical predictor:</span></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true"></a>  coefs_cat &lt;-<span class="st"> </span><span class="kw">rnorm</span>(ncats)</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true"></a>  <span class="co"># Continue linear predictor:</span></span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true"></a>  linpred &lt;-<span class="st"> </span>linpred <span class="op">+</span><span class="st"> </span>coefs_cat[dat_sim<span class="op">$</span>xcat]</span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true"></a>  </span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true"></a>  <span class="co"># Noise predictors:</span></span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true"></a>  dat_sim &lt;-<span class="st"> </span><span class="kw">data.frame</span>(</span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true"></a>    dat_sim,</span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true"></a>    <span class="dt">xn =</span> <span class="kw">matrix</span>(<span class="kw">rnorm</span>(nobs <span class="op">*</span><span class="st"> </span>nnoise), <span class="dt">ncol =</span> nnoise)</span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true"></a>  )</span>
+<span id="cb1-29"><a href="#cb1-29" aria-hidden="true"></a>  </span>
+<span id="cb1-30"><a href="#cb1-30" aria-hidden="true"></a>  <span class="co"># Poisson response, using the log link (i.e., exp() as inverse link):</span></span>
+<span id="cb1-31"><a href="#cb1-31" aria-hidden="true"></a>  dat_sim<span class="op">$</span>y &lt;-<span class="st"> </span><span class="kw">rpois</span>(nobs, <span class="dt">lambda =</span> <span class="kw">exp</span>(linpred))</span>
+<span id="cb1-32"><a href="#cb1-32" aria-hidden="true"></a>  <span class="co"># Shuffle order of observations:</span></span>
+<span id="cb1-33"><a href="#cb1-33" aria-hidden="true"></a>  dat_sim &lt;-<span class="st"> </span>dat_sim[<span class="kw">sample.int</span>(nobs), , drop =<span class="st"> </span><span class="ot">FALSE</span>]</span>
+<span id="cb1-34"><a href="#cb1-34" aria-hidden="true"></a>  <span class="co"># Drop the shuffled original row names:</span></span>
+<span id="cb1-35"><a href="#cb1-35" aria-hidden="true"></a>  <span class="kw">rownames</span>(dat_sim) &lt;-<span class="st"> </span><span class="ot">NULL</span></span>
+<span id="cb1-36"><a href="#cb1-36" aria-hidden="true"></a>  <span class="kw">return</span>(dat_sim)</span>
+<span id="cb1-37"><a href="#cb1-37" aria-hidden="true"></a>}</span>
+<span id="cb1-38"><a href="#cb1-38" aria-hidden="true"></a><span class="co"># Generate data:</span></span>
+<span id="cb1-39"><a href="#cb1-39" aria-hidden="true"></a><span class="kw">set.seed</span>(<span class="dv">300417</span>)</span>
+<span id="cb1-40"><a href="#cb1-40" aria-hidden="true"></a>dat_poiss &lt;-<span class="st"> </span><span class="kw">sim_poiss</span>()</span>
+<span id="cb1-41"><a href="#cb1-41" aria-hidden="true"></a>dat_poiss_train &lt;-<span class="st"> </span><span class="kw">head</span>(dat_poiss, N)</span>
+<span id="cb1-42"><a href="#cb1-42" aria-hidden="true"></a>dat_poiss_test &lt;-<span class="st"> </span><span class="kw">tail</span>(dat_poiss, N)</span></code></pre></div>
+</div>
+<div id="reference-model" class="section level3">
+<h3>Reference model</h3>
+<p>Next, we fit the reference model that we consider as the best model (in terms of predictive performance) that we can construct (here, we assume that we don’t know about the true data-generating process even though the dataset was simulated):</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a><span class="kw">library</span>(rstanarm)</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true"></a><span class="co"># Number of regression coefficients:</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true"></a>( D &lt;-<span class="st"> </span><span class="kw">sum</span>(<span class="kw">grepl</span>(<span class="st">&quot;^x&quot;</span>, <span class="kw">names</span>(dat_poiss_train))) )</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true"></a><span class="co"># Prior guess for the number of relevant (i.e., non-zero) regression</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true"></a><span class="co"># coefficients:</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true"></a>p0 &lt;-<span class="st"> </span><span class="dv">10</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true"></a><span class="co"># Prior guess for the overall magnitude of the response values, see Table 1 of</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true"></a><span class="co"># Piironen and Vehtari (2017, DOI: 10.1214/17-EJS1337SI):</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true"></a>mu_prior &lt;-<span class="st"> </span><span class="dv">100</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true"></a><span class="co"># Hyperprior scale for tau, the global shrinkage parameter:</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true"></a>tau0 &lt;-<span class="st"> </span>p0 <span class="op">/</span><span class="st"> </span>(D <span class="op">-</span><span class="st"> </span>p0) <span class="op">/</span><span class="st"> </span><span class="kw">sqrt</span>(mu_prior) <span class="op">/</span><span class="st"> </span><span class="kw">sqrt</span>(N)</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true"></a><span class="co"># Set this manually if desired:</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true"></a>ncores &lt;-<span class="st"> </span>parallel<span class="op">::</span><span class="kw">detectCores</span>(<span class="dt">logical =</span> <span class="ot">FALSE</span>)</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true"></a><span class="co">### Only for technical reasons in this vignette (you can omit this when running</span></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true"></a><span class="co">### the code yourself):</span></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true"></a>ncores &lt;-<span class="st"> </span><span class="kw">min</span>(ncores, 2L)</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true"></a><span class="co">###</span></span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true"></a><span class="kw">options</span>(<span class="dt">mc.cores =</span> ncores)</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true"></a>refm_fml &lt;-<span class="st"> </span><span class="kw">as.formula</span>(<span class="kw">paste</span>(<span class="st">&quot;y&quot;</span>, <span class="st">&quot;~&quot;</span>, <span class="kw">paste</span>(</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true"></a>  <span class="kw">grep</span>(<span class="st">&quot;^x&quot;</span>, <span class="kw">names</span>(dat_poiss_train), <span class="dt">value =</span> <span class="ot">TRUE</span>),</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true"></a>  <span class="dt">collapse =</span> <span class="st">&quot; + &quot;</span></span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true"></a>)))</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true"></a>refm_fit_poiss &lt;-<span class="st"> </span><span class="kw">stan_glm</span>(</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true"></a>  <span class="dt">formula =</span> refm_fml,</span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true"></a>  <span class="dt">family =</span> <span class="kw">poisson</span>(),</span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true"></a>  <span class="dt">data =</span> dat_poiss_train,</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true"></a>  <span class="dt">prior =</span> <span class="kw">hs</span>(<span class="dt">global_scale =</span> tau0, <span class="dt">slab_df =</span> <span class="dv">100</span>, <span class="dt">slab_scale =</span> <span class="dv">1</span>),</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true"></a>  <span class="dt">chains =</span> <span class="dv">2</span>, <span class="dt">iter =</span> <span class="dv">1000</span>,</span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true"></a>  <span class="dt">refresh =</span> <span class="dv">0</span></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true"></a>)</span></code></pre></div>
+<p>Due to the technical reasons for which we reduced <code>chains</code> and <code>iter</code> in this vignette, we ignore the bulk-ESS warning here.</p>
+</div>
+<div id="variable-selection-using-the-latent-projection" class="section level3">
+<h3>Variable selection using the latent projection</h3>
+<p>Within <strong>projpred</strong>, we define the reference model object explicitly and set <code>latent = TRUE</code> in the corresponding <code>get_refmodel()</code> call (see section <a href="#impl">“Implementation”</a>) so that the latent projection is used in downstream functions. Since we have a hold-out test dataset available, we can use <code>varsel()</code> with argument <code>d_test</code> instead of <code>cv_varsel()</code>. Furthermore, we measure the runtime to be able to compare it to the traditional projection’s later:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a><span class="kw">library</span>(projpred)</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true"></a>d_test_lat_poiss &lt;-<span class="st"> </span><span class="kw">list</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true"></a>  <span class="dt">data =</span> dat_poiss_test,</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true"></a>  <span class="dt">offset =</span> <span class="kw">rep</span>(<span class="dv">0</span>, <span class="kw">nrow</span>(dat_poiss_test)),</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true"></a>  <span class="dt">weights =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">nrow</span>(dat_poiss_test)),</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true"></a>  <span class="co">### Here, we are not interested in latent-scale post-processing, so we can set</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true"></a>  <span class="co">### element `y` to a vector of `NA`s:</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true"></a>  <span class="dt">y =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(dat_poiss_test)),</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true"></a>  <span class="dt">y_oscale =</span> dat_poiss_test<span class="op">$</span>y</span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true"></a>)</span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true"></a>refm_poiss &lt;-<span class="st"> </span><span class="kw">get_refmodel</span>(refm_fit_poiss, <span class="dt">latent =</span> <span class="ot">TRUE</span>)</span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true"></a>time_lat &lt;-<span class="st"> </span><span class="kw">system.time</span>(vs_lat &lt;-<span class="st"> </span><span class="kw">varsel</span>(</span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true"></a>  refm_poiss,</span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true"></a>  <span class="dt">d_test =</span> d_test_lat_poiss,</span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true"></a>  <span class="co">### Only for demonstrating an issue with the traditional projection in the</span></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true"></a>  <span class="co">### next step (not recommended in general):</span></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true"></a>  <span class="dt">method =</span> <span class="st">&quot;L1&quot;</span>,</span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true"></a>  <span class="dt">nclusters_pred =</span> <span class="dv">20</span>,</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true"></a>  <span class="dt">nterms_max =</span> <span class="dv">14</span>,</span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true"></a>  <span class="co">### In interactive use, we recommend not to deactivate the verbose mode:</span></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true"></a>  <span class="dt">verbose =</span> <span class="dv">0</span>,</span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb5-26"><a href="#cb5-26" aria-hidden="true"></a>  <span class="co">### For comparability with varsel() based on the traditional projection:</span></span>
+<span id="cb5-27"><a href="#cb5-27" aria-hidden="true"></a>  <span class="dt">seed =</span> <span class="dv">95930</span></span>
+<span id="cb5-28"><a href="#cb5-28" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb5-29"><a href="#cb5-29" aria-hidden="true"></a>))</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="kw">print</span>(time_lat)</span></code></pre></div>
+<p>The message telling that <code>&lt;refmodel&gt;$dis</code> consists of only <code>NA</code>s will not concern us here because we will only focus on response-scale post-processing.</p>
+<p>In order to decide for a submodel size, we first inspect the <code>plot()</code> results. In contrast to the main vignette where we used the mean log predictive density (MLPD) as predictive performance statistic for a <code>gaussian()</code> family reference model (and <code>gaussian()</code> submodels), we have a discrete family (<code>poisson()</code>) here, so it makes sense to exponentiate the MLPD to obtain the geometric mean predictive density (GMPD; in case of a discrete response, the predictive density values are actually predictive <em>probabilities</em> and hence the GMPD is bounded by 0 and 1). As in the main vignette, we plot with <code>deltas = TRUE</code> (in case of the GMPD, this means that the <em>ratio</em> of the submodel GMPD vs. the reference model GMPD is shown). Via global option <code>projpred.plot_vsel_size_position</code>, we set argument <code>size_position</code> of <code>plot.vsel()</code> to <code>&quot;secondary_x&quot;</code> to make the submodel sizes readable in all of the plots in this vignette.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="kw">options</span>(<span class="dt">projpred.plot_vsel_size_position =</span> <span class="st">&quot;secondary_x&quot;</span>)</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a>( gg_lat &lt;-<span class="st"> </span><span class="kw">plot</span>(vs_lat, <span class="dt">stats =</span> <span class="st">&quot;gmpd&quot;</span>, <span class="dt">deltas =</span> <span class="ot">TRUE</span>) )</span></code></pre></div>
+<p>Based on this plot, we decide for a submodel size of 11:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a>size_decided_lat &lt;-<span class="st"> </span><span class="dv">11</span></span></code></pre></div>
+<p>This is also the size that <code>suggest_size()</code> would suggest:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true"></a><span class="kw">suggest_size</span>(vs_lat, <span class="dt">stat =</span> <span class="st">&quot;gmpd&quot;</span>)</span></code></pre></div>
+<p>In the predictor ranking up to the selected size of , we can see that <strong>projpred</strong> has correctly selected the truly relevant predictors first and only then the noise predictors:</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a>rk_lat &lt;-<span class="st"> </span><span class="kw">ranking</span>(vs_lat)</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true"></a>( predictors_final_lat &lt;-<span class="st"> </span><span class="kw">head</span>(rk_lat[[<span class="st">&quot;fulldata&quot;</span>]], size_decided_lat) )</span></code></pre></div>
+<p>We will skip post-selection inference here (see the main vignette for a demonstration of post-selection inference), but note that <code>proj_predict()</code> has argument <code>resp_oscale</code> for controlling whether to draw from the posterior-projection predictive distributions on the original response scale (<code>TRUE</code>, the default) or on latent scale (<code>FALSE</code>) and that analogous functionality is available in <code>proj_linpred()</code> (argument <code>transform</code>) and <code>predict.refmodel()</code> (argument <code>type</code>).</p>
+</div>
+<div id="variable-selection-using-the-traditional-projection" class="section level3">
+<h3>Variable selection using the traditional projection</h3>
+<p>We will now look at what <strong>projpred</strong>’s traditional projection would have given. For this, we increase <code>nterms_max</code> because this will reveal an issue with this approach:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a>d_test_trad_poiss &lt;-<span class="st"> </span>d_test_lat_poiss</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a>d_test_trad_poiss<span class="op">$</span>y &lt;-<span class="st"> </span>d_test_trad_poiss<span class="op">$</span>y_oscale</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true"></a>d_test_trad_poiss<span class="op">$</span>y_oscale &lt;-<span class="st"> </span><span class="ot">NULL</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true"></a>time_trad &lt;-<span class="st"> </span><span class="kw">system.time</span>(vs_trad &lt;-<span class="st"> </span><span class="kw">varsel</span>(</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true"></a>  refm_fit_poiss,</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true"></a>  <span class="dt">d_test =</span> d_test_trad_poiss,</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true"></a>  <span class="co">### Only for demonstrating an issue with the traditional projection (not</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true"></a>  <span class="co">### recommended in general):</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true"></a>  <span class="dt">method =</span> <span class="st">&quot;L1&quot;</span>,</span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true"></a>  <span class="dt">nclusters_pred =</span> <span class="dv">20</span>,</span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true"></a>  <span class="dt">nterms_max =</span> <span class="dv">30</span>,</span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true"></a>  <span class="co">### In interactive use, we recommend not to deactivate the verbose mode:</span></span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true"></a>  <span class="dt">verbose =</span> <span class="dv">0</span>,</span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true"></a>  <span class="co">### For comparability with varsel() based on the latent projection:</span></span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true"></a>  <span class="dt">seed =</span> <span class="dv">95930</span></span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true"></a>))</span></code></pre></div>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="kw">print</span>(time_trad)</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true"></a>( gg_trad &lt;-<span class="st"> </span><span class="kw">plot</span>(vs_trad, <span class="dt">stats =</span> <span class="st">&quot;gmpd&quot;</span>, <span class="dt">deltas =</span> <span class="ot">TRUE</span>) )</span></code></pre></div>
+<p>As these results show, the traditional projection takes longer than the latent projection, although the difference is rather small on absolute scale (which is due to the fact that the L1 search is already quite fast). More importantly however, the predictor ranking contains several noise terms before truly relevant ones, causing the predictive performance of the reference model not to be reached before submodel size 28.</p>
+</div>
+<div id="conclusion" class="section level3">
+<h3>Conclusion</h3>
+<p>This example showed that the latent projection can be advantageous also for families supported by <strong>projpred</strong>’s traditional projection by improving the runtime as well as the results of the variable selection.</p>
+<!-- **Forward search START:** -->
+<!-- ```{r} -->
+<!-- time_lat_fw <- system.time(vs_lat_fw <- varsel( -->
+<!--   refm_poiss, -->
+<!--   d_test = d_test_lat_poiss, -->
+<!--   ### Only for demonstrating an issue with the traditional projection in the -->
+<!--   ### next step (not recommended in general): -->
+<!--   # method = "L1", -->
+<!--   ### -->
+<!--   ### Only for the sake of speed (not recommended in general): -->
+<!--   nclusters_pred = 20, -->
+<!--   ### -->
+<!--   nterms_max = 14, -->
+<!--   ### In interactive use, we recommend not to deactivate the verbose mode: -->
+<!--   verbose = 0, -->
+<!--   ### -->
+<!--   ### For comparability with varsel() based on the traditional projection: -->
+<!--   seed = 95930 -->
+<!--   ### -->
+<!-- )) -->
+<!-- print(time_lat_fw) -->
+<!-- ( gg_lat_fw <- plot(vs_lat_fw, stats = "gmpd", deltas = TRUE) ) -->
+<!-- ``` -->
+<!-- ```{r} -->
+<!-- time_trad_fw <- system.time(vs_trad_fw <- varsel( -->
+<!--     refm_fit_poiss, -->
+<!--     d_test = d_test_trad_poiss, -->
+<!--     ### Only for demonstrating an issue with the traditional projection (not -->
+<!--     ### recommended in general): -->
+<!--     # method = "L1", -->
+<!--     ### -->
+<!--     ### Only for the sake of speed (not recommended in general): -->
+<!--     nclusters_pred = 20, -->
+<!--     ### -->
+<!--     nterms_max = 30, -->
+<!--     ### In interactive use, we recommend not to deactivate the verbose mode: -->
+<!--     verbose = 0, -->
+<!--     ### -->
+<!--     ### For comparability with varsel() based on the latent projection: -->
+<!--     seed = 95930 -->
+<!--     ### -->
+<!-- )) -->
+<!-- print(time_trad_fw) -->
+<!-- ( gg_trad_fw <- plot(vs_trad_fw, stats = "gmpd", deltas = TRUE) ) -->
+<!-- ``` -->
+<!-- **Forward search END** -->
+<p>An important point is that we have used L1 search here. In case of the latent projection, a forward search would have given only slightly different results. However, in case of the traditional projection, a forward search would have given markedly better results (in particular, all of the noise terms would have been selected after the truly relevant ones). Thus, the conclusions made here for L1 search cannot be transmitted easily to forward search.</p>
+</div>
+</div>
+<div id="negbinex" class="section level2">
+<h2>Example: Negative binomial distribution</h2>
+<p>In this example, we will illustrate the latent projection in case of the negative binomial family (more precisely, we will use the <code>rstanarm::neg_binomial_2()</code> family here) which is a family that is not supported by <strong>projpred</strong>’s traditional projection<a href="#fn6" class="footnote-ref" id="fnref6"><sup>6</sup></a>.</p>
+<div id="data-1" class="section level3">
+<h3>Data</h3>
+<p>We will re-use the data generated above in the Poisson example.</p>
+</div>
+<div id="reference-model-1" class="section level3">
+<h3>Reference model</h3>
+<p>We now fit a reference model with the negative binomial distribution as response family. For the sake of simplicity, we won’t adjust <code>tau0</code> to this new family, but in a real-world example, such an adjustment would be necessary. However, since Table 1 of <span class="citation">Piironen and Vehtari (<a href="#ref-piironen_sparsity_2017" role="doc-biblioref">2017</a>)</span> does not list the negative binomial distribution, this would first require a manual derivation of the pseudo-variance <span class="math inline">\(\tilde{\sigma}^2\)</span>.</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true"></a>refm_fit_nebin &lt;-<span class="st"> </span><span class="kw">stan_glm</span>(</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true"></a>  <span class="dt">formula =</span> refm_fml,</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true"></a>  <span class="dt">family =</span> <span class="kw">neg_binomial_2</span>(),</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true"></a>  <span class="dt">data =</span> dat_poiss_train,</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true"></a>  <span class="dt">prior =</span> <span class="kw">hs</span>(<span class="dt">global_scale =</span> tau0, <span class="dt">slab_df =</span> <span class="dv">100</span>, <span class="dt">slab_scale =</span> <span class="dv">1</span>),</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true"></a>  <span class="dt">chains =</span> <span class="dv">2</span>, <span class="dt">iter =</span> <span class="dv">1000</span>,</span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true"></a>  <span class="dt">refresh =</span> <span class="dv">0</span></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true"></a>)</span></code></pre></div>
+<p>Again, we ignore the bulk-ESS warning due to the technical reasons for which we reduced <code>chains</code> and <code>iter</code> in this vignette.</p>
+</div>
+<div id="variable-selection-using-the-latent-projection-1" class="section level3">
+<h3>Variable selection using the latent projection</h3>
+<p>To request the latent projection with <code>latent = TRUE</code>, we now need to specify more arguments (<code>latent_ll_oscale</code> and <code>latent_ppd_oscale</code>; the internal default for <code>latent_ilink</code> works correctly in this example) which will be passed to <code>extend_family()</code><a href="#fn7" class="footnote-ref" id="fnref7"><sup>7</sup></a>:</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true"></a>refm_prec &lt;-<span class="st"> </span><span class="kw">as.matrix</span>(refm_fit_nebin)[, <span class="st">&quot;reciprocal_dispersion&quot;</span>, drop =<span class="st"> </span><span class="ot">FALSE</span>]</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true"></a>latent_ll_oscale_nebin &lt;-<span class="st"> </span><span class="cf">function</span>(ilpreds,</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true"></a>                                   <span class="dt">dis =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(ilpreds)),</span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true"></a>                                   y_oscale,</span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true"></a>                                   <span class="dt">wobs =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">ncol</span>(ilpreds)),</span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true"></a>                                   cens,</span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true"></a>                                   cl_ref,</span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true"></a>                                   <span class="dt">wdraws_ref =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">length</span>(cl_ref))) {</span>
+<span id="cb14-9"><a href="#cb14-9" aria-hidden="true"></a>  y_oscale_mat &lt;-<span class="st"> </span><span class="kw">matrix</span>(y_oscale, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds),</span>
+<span id="cb14-10"><a href="#cb14-10" aria-hidden="true"></a>                         <span class="dt">byrow =</span> <span class="ot">TRUE</span>)</span>
+<span id="cb14-11"><a href="#cb14-11" aria-hidden="true"></a>  wobs_mat &lt;-<span class="st"> </span><span class="kw">matrix</span>(wobs, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds),</span>
+<span id="cb14-12"><a href="#cb14-12" aria-hidden="true"></a>                     <span class="dt">byrow =</span> <span class="ot">TRUE</span>)</span>
+<span id="cb14-13"><a href="#cb14-13" aria-hidden="true"></a>  refm_prec_agg &lt;-<span class="st"> </span><span class="kw">cl_agg</span>(refm_prec, <span class="dt">cl =</span> cl_ref, <span class="dt">wdraws =</span> wdraws_ref)</span>
+<span id="cb14-14"><a href="#cb14-14" aria-hidden="true"></a>  ll_unw &lt;-<span class="st"> </span><span class="kw">dnbinom</span>(y_oscale_mat, <span class="dt">size =</span> refm_prec_agg, <span class="dt">mu =</span> ilpreds, <span class="dt">log =</span> <span class="ot">TRUE</span>)</span>
+<span id="cb14-15"><a href="#cb14-15" aria-hidden="true"></a>  <span class="kw">return</span>(wobs_mat <span class="op">*</span><span class="st"> </span>ll_unw)</span>
+<span id="cb14-16"><a href="#cb14-16" aria-hidden="true"></a>}</span>
+<span id="cb14-17"><a href="#cb14-17" aria-hidden="true"></a>latent_ppd_oscale_nebin &lt;-<span class="st"> </span><span class="cf">function</span>(ilpreds_resamp,</span>
+<span id="cb14-18"><a href="#cb14-18" aria-hidden="true"></a>                                    <span class="dt">dis_resamp =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(ilpreds_resamp)),</span>
+<span id="cb14-19"><a href="#cb14-19" aria-hidden="true"></a>                                    <span class="dt">wobs =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">ncol</span>(ilpreds_resamp)),</span>
+<span id="cb14-20"><a href="#cb14-20" aria-hidden="true"></a>                                    cl_ref,</span>
+<span id="cb14-21"><a href="#cb14-21" aria-hidden="true"></a>                                    <span class="dt">wdraws_ref =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">length</span>(cl_ref)),</span>
+<span id="cb14-22"><a href="#cb14-22" aria-hidden="true"></a>                                    idxs_prjdraws) {</span>
+<span id="cb14-23"><a href="#cb14-23" aria-hidden="true"></a>  refm_prec_agg &lt;-<span class="st"> </span><span class="kw">cl_agg</span>(refm_prec, <span class="dt">cl =</span> cl_ref, <span class="dt">wdraws =</span> wdraws_ref)</span>
+<span id="cb14-24"><a href="#cb14-24" aria-hidden="true"></a>  refm_prec_agg_resamp &lt;-<span class="st"> </span>refm_prec_agg[idxs_prjdraws, , drop =<span class="st"> </span><span class="ot">FALSE</span>]</span>
+<span id="cb14-25"><a href="#cb14-25" aria-hidden="true"></a>  ppd &lt;-<span class="st"> </span><span class="kw">rnbinom</span>(<span class="kw">prod</span>(<span class="kw">dim</span>(ilpreds_resamp)), <span class="dt">size =</span> refm_prec_agg_resamp,</span>
+<span id="cb14-26"><a href="#cb14-26" aria-hidden="true"></a>                 <span class="dt">mu =</span> ilpreds_resamp)</span>
+<span id="cb14-27"><a href="#cb14-27" aria-hidden="true"></a>  ppd &lt;-<span class="st"> </span><span class="kw">matrix</span>(ppd, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds_resamp), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds_resamp))</span>
+<span id="cb14-28"><a href="#cb14-28" aria-hidden="true"></a>  <span class="kw">return</span>(ppd)</span>
+<span id="cb14-29"><a href="#cb14-29" aria-hidden="true"></a>}</span>
+<span id="cb14-30"><a href="#cb14-30" aria-hidden="true"></a>refm_nebin &lt;-<span class="st"> </span><span class="kw">get_refmodel</span>(refm_fit_nebin, <span class="dt">latent =</span> <span class="ot">TRUE</span>,</span>
+<span id="cb14-31"><a href="#cb14-31" aria-hidden="true"></a>                           <span class="dt">latent_ll_oscale =</span> latent_ll_oscale_nebin,</span>
+<span id="cb14-32"><a href="#cb14-32" aria-hidden="true"></a>                           <span class="dt">latent_ppd_oscale =</span> latent_ppd_oscale_nebin)</span>
+<span id="cb14-33"><a href="#cb14-33" aria-hidden="true"></a>vs_nebin &lt;-<span class="st"> </span><span class="kw">varsel</span>(</span>
+<span id="cb14-34"><a href="#cb14-34" aria-hidden="true"></a>  refm_nebin,</span>
+<span id="cb14-35"><a href="#cb14-35" aria-hidden="true"></a>  <span class="dt">d_test =</span> d_test_lat_poiss,</span>
+<span id="cb14-36"><a href="#cb14-36" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb14-37"><a href="#cb14-37" aria-hidden="true"></a>  <span class="dt">method =</span> <span class="st">&quot;L1&quot;</span>,</span>
+<span id="cb14-38"><a href="#cb14-38" aria-hidden="true"></a>  <span class="dt">nclusters_pred =</span> <span class="dv">20</span>,</span>
+<span id="cb14-39"><a href="#cb14-39" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb14-40"><a href="#cb14-40" aria-hidden="true"></a>  <span class="dt">nterms_max =</span> <span class="dv">14</span>,</span>
+<span id="cb14-41"><a href="#cb14-41" aria-hidden="true"></a>  <span class="co">### In interactive use, we recommend not to deactivate the verbose mode:</span></span>
+<span id="cb14-42"><a href="#cb14-42" aria-hidden="true"></a>  <span class="dt">verbose =</span> <span class="dv">0</span></span>
+<span id="cb14-43"><a href="#cb14-43" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb14-44"><a href="#cb14-44" aria-hidden="true"></a>)</span></code></pre></div>
+<p>Again, the message telling that <code>&lt;refmodel&gt;$dis</code> consists of only <code>NA</code>s will not concern us here because we will only focus on response-scale post-processing. The message concerning <code>latent_ilink</code> can be safely ignored here (the internal default based on <code>family$linkinv</code> works correctly in this case).</p>
+<p>Again, we first inspect the <code>plot()</code> results to decide for a submodel size:</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true"></a>( gg_nebin &lt;-<span class="st"> </span><span class="kw">plot</span>(vs_nebin, <span class="dt">stats =</span> <span class="st">&quot;gmpd&quot;</span>, <span class="dt">deltas =</span> <span class="ot">TRUE</span>) )</span></code></pre></div>
+<p>For the decision of the final submodel size, we act as if we preferred accuracy over sparsity in their trade-off mentioned in the <a href="https://mc-stan.org/projpred/articles/projpred.html#decision-size">main vignette</a>, so we decide for a submodel size of 11:</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true"></a>size_decided_nebin &lt;-<span class="st"> </span><span class="dv">11</span></span></code></pre></div>
+<p>This is not the size that <code>suggest_size()</code> would suggest, but as mentioned in the main vignette and in the documentation, <code>suggest_size()</code> provides only a quite heuristic decision (so we stick with our manual decision here):</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true"></a><span class="kw">suggest_size</span>(vs_nebin, <span class="dt">stat =</span> <span class="st">&quot;gmpd&quot;</span>)</span></code></pre></div>
+<p>As we can see from the predictor ranking included in the plot, our selected predictor terms lack one truly relevant predictor (<code>x.9</code>) and include one noise term (<code>xn.29</code>). More explicitly, our selected predictor terms are:</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true"></a>rk_nebin &lt;-<span class="st"> </span><span class="kw">ranking</span>(vs_nebin)</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true"></a>( predictors_final_nebin &lt;-<span class="st"> </span><span class="kw">head</span>(rk_nebin[[<span class="st">&quot;fulldata&quot;</span>]],</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true"></a>                                 size_decided_nebin) )</span></code></pre></div>
+<p>Again, we will skip post-selection inference here (see the main vignette for a demonstration of post-selection inference).</p>
+</div>
+<div id="conclusion-1" class="section level3">
+<h3>Conclusion</h3>
+<p>This example demonstrated how the latent projection can be used for those families which are neither supported by <strong>projpred</strong>’s traditional nor by <strong>projpred</strong>’s augmented-data projection, which reflects the flexibility of the latent approach.</p>
+</div>
+</div>
+<div id="cens" class="section level2">
+<h2>Censored observations (survival analysis)</h2>
+<p>Response-scale analyses for models with censored responses (e.g., for time-to-event models as occurring in survival analysis) are possible when using the latent projection in combination with a custom <code>latent_ll_oscale</code> function (see <code>?extend_family</code>) that has an attribute called <code>cens_var</code> and makes use of its argument <code>cens</code><a href="#fn8" class="footnote-ref" id="fnref8"><sup>8</sup></a>.</p>
+<p>We will illustrate this here using simulated data and right censoring, first with a Weibull response and then with a log-normal response. Both examples are adapted from a <a href="https://discourse.mc-stan.org/t/using-projpred-latent-projection-with-brms-weibull-family-models/39275">thread</a> on The Stan Forums. Here, we use the following common simulation part:</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true"></a>N_surv &lt;-<span class="st"> </span><span class="dv">500</span></span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true"></a>n_pred &lt;-<span class="st"> </span><span class="dv">50</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true"></a>n_pred_truth &lt;-<span class="st"> </span><span class="dv">10</span></span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true"></a>n_pred_noise &lt;-<span class="st"> </span>n_pred <span class="op">-</span><span class="st"> </span>n_pred_truth</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true"></a>dat_sim_surv &lt;-<span class="st"> </span><span class="kw">matrix</span>(<span class="kw">rnorm</span>(N_surv <span class="op">*</span><span class="st"> </span>n_pred), <span class="dt">ncol =</span> n_pred)</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true"></a><span class="kw">colnames</span>(dat_sim_surv) &lt;-<span class="st"> </span><span class="kw">paste0</span>(<span class="st">&quot;x&quot;</span>, <span class="kw">c</span>(<span class="kw">paste0</span>(<span class="st">&quot;.&quot;</span>, <span class="kw">seq_len</span>(n_pred_truth)),</span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true"></a>                                        <span class="kw">paste0</span>(<span class="st">&quot;n.&quot;</span>, <span class="kw">seq_len</span>(n_pred_noise))))</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true"></a>linpreds_surv &lt;-<span class="st"> </span><span class="fl">-0.1</span> <span class="op">+</span></span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true"></a><span class="st">    </span>dat_sim_surv[, <span class="kw">seq_len</span>(n_pred_truth), drop =<span class="st"> </span><span class="ot">FALSE</span>] <span class="op">%*%</span></span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true"></a><span class="st">    </span><span class="kw">rep_len</span>(<span class="kw">c</span>(<span class="fl">0.3</span>, <span class="fl">-0.2</span>), <span class="dt">length.out =</span> n_pred_truth)</span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true"></a>epreds_surv &lt;-<span class="st"> </span><span class="kw">exp</span>(linpreds_surv)</span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true"></a>dat_sim_surv &lt;-<span class="st"> </span><span class="kw">as.data.frame</span>(dat_sim_surv)</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true"></a>cens_surv &lt;-<span class="st"> </span><span class="kw">runif</span>(N_surv,</span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true"></a>                   <span class="dt">min =</span> <span class="kw">quantile</span>(epreds_surv, <span class="dt">probs =</span> <span class="fl">0.4</span>),</span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true"></a>                   <span class="dt">max =</span> <span class="kw">quantile</span>(epreds_surv, <span class="dt">probs =</span> <span class="fl">0.9</span>))</span></code></pre></div>
+<div id="weibullcensex" class="section level3">
+<h3>Example: Weibull distribution with right-censored observations</h3>
+<p>For the Weibull model, we complete our data generation as follows:</p>
+<div class="sourceCode" id="cb20"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true"></a>shape_weib &lt;-<span class="st"> </span><span class="fl">1.2</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true"></a>scales_weib &lt;-<span class="st"> </span>epreds_surv <span class="op">/</span><span class="st"> </span>(<span class="kw">gamma</span>(<span class="dv">1</span> <span class="op">+</span><span class="st"> </span>(<span class="dv">1</span> <span class="op">/</span><span class="st"> </span>shape_weib)))</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true"></a>y_weib &lt;-<span class="st"> </span><span class="kw">rweibull</span>(N_surv, <span class="dt">shape =</span> shape_weib, <span class="dt">scale =</span> scales_weib)</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true"></a>is_event_weib &lt;-<span class="st"> </span>y_weib <span class="op">&lt;</span><span class="st"> </span>cens_surv</span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true"></a>yobs_weib &lt;-<span class="st"> </span>y_weib</span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true"></a>yobs_weib[<span class="op">!</span>is_event_weib] &lt;-<span class="st"> </span>cens_surv[<span class="op">!</span>is_event_weib]</span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true"></a>dat_sim_weib &lt;-<span class="st"> </span><span class="kw">data.frame</span>(<span class="dt">yobs =</span> yobs_weib,</span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true"></a>                           <span class="dt">is_censored =</span> <span class="dv">1</span> <span class="op">-</span><span class="st"> </span>is_event_weib,</span>
+<span id="cb20-9"><a href="#cb20-9" aria-hidden="true"></a>                           dat_sim_surv)</span></code></pre></div>
+<p>We now fit a reference model in <a href="https://paulbuerkner.com/brms/"><strong>brms</strong></a>:</p>
+<div class="sourceCode" id="cb21"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true"></a>refm_fit_weib &lt;-<span class="st"> </span>brms<span class="op">::</span><span class="kw">brm</span>(</span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true"></a>  <span class="dt">formula =</span> yobs <span class="op">|</span><span class="st"> </span><span class="kw">cens</span>(is_censored) <span class="op">~</span><span class="st"> </span>.,</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true"></a>  <span class="dt">family =</span> brms<span class="op">::</span><span class="kw">weibull</span>(),</span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true"></a>  <span class="dt">data =</span> dat_sim_weib,</span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true"></a>  <span class="dt">prior =</span> brms<span class="op">::</span><span class="kw">prior</span>(<span class="kw">R2D2</span>(<span class="dt">mean_R2 =</span> <span class="fl">0.4</span>, <span class="dt">prec_R2 =</span> <span class="fl">2.5</span>, <span class="dt">cons_D2 =</span> <span class="dv">1</span>)),</span>
+<span id="cb21-6"><a href="#cb21-6" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb21-7"><a href="#cb21-7" aria-hidden="true"></a>  <span class="dt">chains =</span> <span class="dv">2</span>,</span>
+<span id="cb21-8"><a href="#cb21-8" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb21-9"><a href="#cb21-9" aria-hidden="true"></a>  <span class="dt">silent =</span> <span class="dv">2</span>,</span>
+<span id="cb21-10"><a href="#cb21-10" aria-hidden="true"></a>  <span class="dt">refresh =</span> <span class="dv">0</span></span>
+<span id="cb21-11"><a href="#cb21-11" aria-hidden="true"></a>)</span></code></pre></div>
+<p>The following code prepares the <code>cv_varsel()</code> run and the downstream <strong>projpred</strong> steps:</p>
+<div class="sourceCode" id="cb22"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true"></a>refm_shape &lt;-<span class="st"> </span><span class="kw">as.matrix</span>(refm_fit_weib)[, <span class="st">&quot;shape&quot;</span>, drop =<span class="st"> </span><span class="ot">FALSE</span>]</span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true"></a></span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true"></a>latent_ll_oscale_weib &lt;-<span class="st"> </span><span class="kw">structure</span>(<span class="cf">function</span>(</span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true"></a>    ilpreds,</span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true"></a>    <span class="dt">dis =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(ilpreds)),</span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true"></a>    y_oscale,</span>
+<span id="cb22-7"><a href="#cb22-7" aria-hidden="true"></a>    <span class="dt">wobs =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">ncol</span>(ilpreds)),</span>
+<span id="cb22-8"><a href="#cb22-8" aria-hidden="true"></a>    cens,</span>
+<span id="cb22-9"><a href="#cb22-9" aria-hidden="true"></a>    cl_ref,</span>
+<span id="cb22-10"><a href="#cb22-10" aria-hidden="true"></a>    <span class="dt">wdraws_ref =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">length</span>(cl_ref))</span>
+<span id="cb22-11"><a href="#cb22-11" aria-hidden="true"></a>) {</span>
+<span id="cb22-12"><a href="#cb22-12" aria-hidden="true"></a>  idxs_cens &lt;-<span class="st"> </span><span class="kw">which</span>(cens <span class="op">==</span><span class="st"> </span><span class="dv">1</span>)</span>
+<span id="cb22-13"><a href="#cb22-13" aria-hidden="true"></a>  idxs_event &lt;-<span class="st"> </span><span class="kw">setdiff</span>(<span class="kw">seq_along</span>(cens), idxs_cens)</span>
+<span id="cb22-14"><a href="#cb22-14" aria-hidden="true"></a>  wobs_mat &lt;-<span class="st"> </span><span class="kw">matrix</span>(wobs, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds),</span>
+<span id="cb22-15"><a href="#cb22-15" aria-hidden="true"></a>                     <span class="dt">byrow =</span> <span class="ot">TRUE</span>)</span>
+<span id="cb22-16"><a href="#cb22-16" aria-hidden="true"></a>  refm_shape_agg &lt;-<span class="st"> </span><span class="kw">cl_agg</span>(refm_shape, <span class="dt">cl =</span> cl_ref, <span class="dt">wdraws =</span> wdraws_ref)</span>
+<span id="cb22-17"><a href="#cb22-17" aria-hidden="true"></a>  ll_unw &lt;-<span class="st"> </span><span class="kw">matrix</span>(<span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds))</span>
+<span id="cb22-18"><a href="#cb22-18" aria-hidden="true"></a>  <span class="cf">for</span> (idx_cens <span class="cf">in</span> idxs_cens) {</span>
+<span id="cb22-19"><a href="#cb22-19" aria-hidden="true"></a>    ll_unw[, idx_cens] &lt;-<span class="st"> </span><span class="kw">pweibull</span>(</span>
+<span id="cb22-20"><a href="#cb22-20" aria-hidden="true"></a>      y_oscale[idx_cens],</span>
+<span id="cb22-21"><a href="#cb22-21" aria-hidden="true"></a>      <span class="dt">shape =</span> refm_shape_agg,</span>
+<span id="cb22-22"><a href="#cb22-22" aria-hidden="true"></a>      <span class="dt">scale =</span> ilpreds[, idx_cens] <span class="op">/</span><span class="st"> </span><span class="kw">gamma</span>(<span class="dv">1</span> <span class="op">+</span><span class="st"> </span><span class="dv">1</span> <span class="op">/</span><span class="st"> </span><span class="kw">as.vector</span>(refm_shape_agg)),</span>
+<span id="cb22-23"><a href="#cb22-23" aria-hidden="true"></a>      <span class="dt">lower.tail =</span> <span class="ot">FALSE</span>,</span>
+<span id="cb22-24"><a href="#cb22-24" aria-hidden="true"></a>      <span class="dt">log.p =</span> <span class="ot">TRUE</span></span>
+<span id="cb22-25"><a href="#cb22-25" aria-hidden="true"></a>    )</span>
+<span id="cb22-26"><a href="#cb22-26" aria-hidden="true"></a>  }</span>
+<span id="cb22-27"><a href="#cb22-27" aria-hidden="true"></a>  <span class="cf">for</span> (idx_event <span class="cf">in</span> idxs_event) {</span>
+<span id="cb22-28"><a href="#cb22-28" aria-hidden="true"></a>    ll_unw[, idx_event] &lt;-<span class="st"> </span><span class="kw">dweibull</span>(</span>
+<span id="cb22-29"><a href="#cb22-29" aria-hidden="true"></a>      y_oscale[idx_event],</span>
+<span id="cb22-30"><a href="#cb22-30" aria-hidden="true"></a>      <span class="dt">shape =</span> refm_shape_agg,</span>
+<span id="cb22-31"><a href="#cb22-31" aria-hidden="true"></a>      <span class="dt">scale =</span> ilpreds[, idx_event] <span class="op">/</span><span class="st"> </span><span class="kw">gamma</span>(<span class="dv">1</span> <span class="op">+</span><span class="st"> </span><span class="dv">1</span> <span class="op">/</span><span class="st"> </span><span class="kw">as.vector</span>(refm_shape_agg)),</span>
+<span id="cb22-32"><a href="#cb22-32" aria-hidden="true"></a>      <span class="dt">log =</span> <span class="ot">TRUE</span></span>
+<span id="cb22-33"><a href="#cb22-33" aria-hidden="true"></a>    )</span>
+<span id="cb22-34"><a href="#cb22-34" aria-hidden="true"></a>  }</span>
+<span id="cb22-35"><a href="#cb22-35" aria-hidden="true"></a>  <span class="kw">return</span>(wobs_mat <span class="op">*</span><span class="st"> </span>ll_unw)</span>
+<span id="cb22-36"><a href="#cb22-36" aria-hidden="true"></a>}, <span class="dt">cens_var =</span> <span class="op">~</span><span class="st"> </span>is_censored)</span>
+<span id="cb22-37"><a href="#cb22-37" aria-hidden="true"></a></span>
+<span id="cb22-38"><a href="#cb22-38" aria-hidden="true"></a>latent_ppd_oscale_weib &lt;-<span class="st"> </span><span class="cf">function</span>(</span>
+<span id="cb22-39"><a href="#cb22-39" aria-hidden="true"></a>    ilpreds_resamp,</span>
+<span id="cb22-40"><a href="#cb22-40" aria-hidden="true"></a>    <span class="dt">dis_resamp =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(ilpreds_resamp)),</span>
+<span id="cb22-41"><a href="#cb22-41" aria-hidden="true"></a>    <span class="dt">wobs =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">ncol</span>(ilpreds_resamp)),</span>
+<span id="cb22-42"><a href="#cb22-42" aria-hidden="true"></a>    cl_ref,</span>
+<span id="cb22-43"><a href="#cb22-43" aria-hidden="true"></a>    <span class="dt">wdraws_ref =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">length</span>(cl_ref)),</span>
+<span id="cb22-44"><a href="#cb22-44" aria-hidden="true"></a>    idxs_prjdraws</span>
+<span id="cb22-45"><a href="#cb22-45" aria-hidden="true"></a>) {</span>
+<span id="cb22-46"><a href="#cb22-46" aria-hidden="true"></a>  <span class="kw">warning</span>(<span class="st">&quot;The draws from this `latent_ppd_oscale` function are uncensored.&quot;</span>)</span>
+<span id="cb22-47"><a href="#cb22-47" aria-hidden="true"></a>  refm_shape_agg &lt;-<span class="st"> </span><span class="kw">cl_agg</span>(refm_shape, <span class="dt">cl =</span> cl_ref, <span class="dt">wdraws =</span> wdraws_ref)</span>
+<span id="cb22-48"><a href="#cb22-48" aria-hidden="true"></a>  refm_shape_agg_resamp &lt;-<span class="st"> </span>refm_shape_agg[idxs_prjdraws, , drop =<span class="st"> </span><span class="ot">FALSE</span>]</span>
+<span id="cb22-49"><a href="#cb22-49" aria-hidden="true"></a>  ppd &lt;-<span class="st"> </span><span class="kw">rweibull</span>(</span>
+<span id="cb22-50"><a href="#cb22-50" aria-hidden="true"></a>    <span class="kw">prod</span>(<span class="kw">dim</span>(ilpreds_resamp)),</span>
+<span id="cb22-51"><a href="#cb22-51" aria-hidden="true"></a>    <span class="dt">shape =</span> refm_shape_agg_resamp,</span>
+<span id="cb22-52"><a href="#cb22-52" aria-hidden="true"></a>    <span class="dt">scale =</span> ilpreds_resamp <span class="op">/</span><span class="st"> </span><span class="kw">gamma</span>(<span class="dv">1</span> <span class="op">+</span><span class="st"> </span><span class="dv">1</span> <span class="op">/</span><span class="st"> </span><span class="kw">as.vector</span>(refm_shape_agg_resamp))</span>
+<span id="cb22-53"><a href="#cb22-53" aria-hidden="true"></a>  )</span>
+<span id="cb22-54"><a href="#cb22-54" aria-hidden="true"></a>  ppd &lt;-<span class="st"> </span><span class="kw">matrix</span>(ppd, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds_resamp), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds_resamp))</span>
+<span id="cb22-55"><a href="#cb22-55" aria-hidden="true"></a>  <span class="kw">return</span>(ppd)</span>
+<span id="cb22-56"><a href="#cb22-56" aria-hidden="true"></a>}</span>
+<span id="cb22-57"><a href="#cb22-57" aria-hidden="true"></a></span>
+<span id="cb22-58"><a href="#cb22-58" aria-hidden="true"></a>refm_weib &lt;-<span class="st"> </span><span class="kw">get_refmodel</span>(</span>
+<span id="cb22-59"><a href="#cb22-59" aria-hidden="true"></a>  refm_fit_weib,</span>
+<span id="cb22-60"><a href="#cb22-60" aria-hidden="true"></a>  <span class="dt">latent =</span> <span class="ot">TRUE</span>,</span>
+<span id="cb22-61"><a href="#cb22-61" aria-hidden="true"></a>  <span class="dt">latent_ll_oscale =</span> latent_ll_oscale_weib,</span>
+<span id="cb22-62"><a href="#cb22-62" aria-hidden="true"></a>  <span class="dt">latent_ppd_oscale =</span> latent_ppd_oscale_weib</span>
+<span id="cb22-63"><a href="#cb22-63" aria-hidden="true"></a>)</span></code></pre></div>
+<p>Again, the message telling that <code>&lt;refmodel&gt;$dis</code> consists of only <code>NA</code>s will not concern us here because we will only focus on response-scale post-processing. The message concerning <code>latent_ilink</code> can be safely ignored here (the internal default based on <code>family$linkinv</code> works correctly in this case).</p>
+<p>Run <code>cv_varsel()</code>:</p>
+<div class="sourceCode" id="cb23"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true"></a><span class="co"># For running projpred&#39;s CV in parallel (see cv_varsel()&#39;s argument `parallel`):</span></span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true"></a><span class="co"># Note: Parallel processing is disabled during package building to avoid issues</span></span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true"></a>use_parallel &lt;-<span class="st"> </span><span class="ot">FALSE</span>  <span class="co"># Set to TRUE for actual parallel processing</span></span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true"></a><span class="cf">if</span> (use_parallel) {</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true"></a>  doParallel<span class="op">::</span><span class="kw">registerDoParallel</span>(ncores)</span>
+<span id="cb23-6"><a href="#cb23-6" aria-hidden="true"></a>}</span>
+<span id="cb23-7"><a href="#cb23-7" aria-hidden="true"></a>cvvs_weib &lt;-<span class="st"> </span><span class="kw">cv_varsel</span>(</span>
+<span id="cb23-8"><a href="#cb23-8" aria-hidden="true"></a>  refm_weib,</span>
+<span id="cb23-9"><a href="#cb23-9" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb23-10"><a href="#cb23-10" aria-hidden="true"></a>  <span class="dt">method =</span> <span class="st">&quot;L1&quot;</span>,</span>
+<span id="cb23-11"><a href="#cb23-11" aria-hidden="true"></a>  <span class="dt">nloo =</span> <span class="kw">min</span>(N_surv, <span class="dv">10</span>),</span>
+<span id="cb23-12"><a href="#cb23-12" aria-hidden="true"></a>  <span class="dt">nterms_max =</span> <span class="dv">11</span>,</span>
+<span id="cb23-13"><a href="#cb23-13" aria-hidden="true"></a>  <span class="dt">nclusters_pred =</span> <span class="dv">20</span>,</span>
+<span id="cb23-14"><a href="#cb23-14" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb23-15"><a href="#cb23-15" aria-hidden="true"></a>  <span class="dt">parallel =</span> use_parallel,</span>
+<span id="cb23-16"><a href="#cb23-16" aria-hidden="true"></a>  <span class="co">### In interactive use, we recommend not to deactivate the verbose mode:</span></span>
+<span id="cb23-17"><a href="#cb23-17" aria-hidden="true"></a>  <span class="dt">verbose =</span> <span class="dv">0</span></span>
+<span id="cb23-18"><a href="#cb23-18" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb23-19"><a href="#cb23-19" aria-hidden="true"></a>)</span>
+<span id="cb23-20"><a href="#cb23-20" aria-hidden="true"></a><span class="co"># Tear down the CV parallelization setup:</span></span>
+<span id="cb23-21"><a href="#cb23-21" aria-hidden="true"></a><span class="cf">if</span> (use_parallel) {</span>
+<span id="cb23-22"><a href="#cb23-22" aria-hidden="true"></a>  doParallel<span class="op">::</span><span class="kw">stopImplicitCluster</span>()</span>
+<span id="cb23-23"><a href="#cb23-23" aria-hidden="true"></a>  foreach<span class="op">::</span><span class="kw">registerDoSEQ</span>()</span>
+<span id="cb23-24"><a href="#cb23-24" aria-hidden="true"></a>}</span></code></pre></div>
+<p>In this case, we will ignore the warnings about high Pareto-<span class="math inline">\(\hat{k}\)</span> values because we chose quite rough settings (e.g., only 2 MCMC chains) in this vignette (for technical reasons). We will also ignore the warning that SIS is used (instead of PSIS) because this is due to <code>nclusters_pred = 20</code> which we used only to speed up the building of the vignette.</p>
+<p>Plot the results:</p>
+<div class="sourceCode" id="cb24"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true"></a><span class="kw">plot</span>(cvvs_weib, <span class="dt">stats =</span> <span class="st">&quot;mlpd&quot;</span>, <span class="dt">deltas =</span> <span class="ot">TRUE</span>)</span></code></pre></div>
+<p>Hence, the truly relevant predictors are identified correctly.</p>
+<p>Project onto the submodel consisting of the first <code>n_pred_truth</code> predictors and perform a “posterior-projection predictive check” (PPPC):</p>
+<div class="sourceCode" id="cb25"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true"></a>predictors_final_weib &lt;-<span class="st"> </span><span class="kw">head</span>(<span class="kw">ranking</span>(cvvs_weib)[[<span class="st">&quot;fulldata&quot;</span>]], n_pred_truth)</span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true"></a>prj_weib &lt;-<span class="st"> </span><span class="kw">project</span>(refm_weib, <span class="dt">predictor_terms =</span> predictors_final_weib)</span>
+<span id="cb25-3"><a href="#cb25-3" aria-hidden="true"></a>prj_predict_weib &lt;-<span class="st"> </span><span class="kw">proj_predict</span>(prj_weib)</span>
+<span id="cb25-4"><a href="#cb25-4" aria-hidden="true"></a>bayesplot<span class="op">::</span><span class="kw">bayesplot_theme_set</span>(ggplot2<span class="op">::</span><span class="kw">theme_bw</span>())</span>
+<span id="cb25-5"><a href="#cb25-5" aria-hidden="true"></a>bayesplot<span class="op">::</span><span class="kw">ppc_km_overlay</span>(<span class="dt">y =</span> dat_sim_weib<span class="op">$</span>yobs, <span class="dt">yrep =</span> prj_predict_weib,</span>
+<span id="cb25-6"><a href="#cb25-6" aria-hidden="true"></a>                          <span class="dt">status_y =</span> <span class="dv">1</span> <span class="op">-</span><span class="st"> </span>dat_sim_weib<span class="op">$</span>is_censored)</span></code></pre></div>
+<p>As expected, this PPPC indicates that this submodel is a reasonable one (keeping in mind that such a PPPC is just a single model-diagnostic tool).</p>
+</div>
+<div id="lognormalcensex" class="section level3">
+<h3>Example: Log-normal distribution with right-censored observations</h3>
+<p>For the log-normal model, we complete our data generation as follows:</p>
+<div class="sourceCode" id="cb26"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true"></a>sdlog_lnorm &lt;-<span class="st"> </span><span class="fl">0.3</span></span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true"></a>y_lnorm &lt;-<span class="st"> </span><span class="kw">rlnorm</span>(N_surv, <span class="dt">meanlog =</span> linpreds_surv, <span class="dt">sdlog =</span> sdlog_lnorm)</span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true"></a>is_event_lnorm &lt;-<span class="st"> </span>y_lnorm <span class="op">&lt;</span><span class="st"> </span>cens_surv</span>
+<span id="cb26-4"><a href="#cb26-4" aria-hidden="true"></a>yobs_lnorm &lt;-<span class="st"> </span>y_lnorm</span>
+<span id="cb26-5"><a href="#cb26-5" aria-hidden="true"></a>yobs_lnorm[<span class="op">!</span>is_event_lnorm] &lt;-<span class="st"> </span>cens_surv[<span class="op">!</span>is_event_lnorm]</span>
+<span id="cb26-6"><a href="#cb26-6" aria-hidden="true"></a>dat_sim_lnorm &lt;-<span class="st"> </span><span class="kw">data.frame</span>(<span class="dt">yobs =</span> yobs_lnorm,</span>
+<span id="cb26-7"><a href="#cb26-7" aria-hidden="true"></a>                            <span class="dt">is_censored =</span> <span class="dv">1</span> <span class="op">-</span><span class="st"> </span>is_event_lnorm,</span>
+<span id="cb26-8"><a href="#cb26-8" aria-hidden="true"></a>                            dat_sim_surv)</span></code></pre></div>
+<p>Again, we fit a reference model in <strong>brms</strong>:</p>
+<div class="sourceCode" id="cb27"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true"></a>refm_fit_lnorm &lt;-<span class="st"> </span>brms<span class="op">::</span><span class="kw">brm</span>(</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true"></a>  <span class="dt">formula =</span> yobs <span class="op">|</span><span class="st"> </span><span class="kw">cens</span>(is_censored) <span class="op">~</span><span class="st"> </span>.,</span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true"></a>  <span class="dt">family =</span> brms<span class="op">::</span><span class="kw">lognormal</span>(),</span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true"></a>  <span class="dt">data =</span> dat_sim_lnorm,</span>
+<span id="cb27-5"><a href="#cb27-5" aria-hidden="true"></a>  <span class="dt">prior =</span> brms<span class="op">::</span><span class="kw">prior</span>(<span class="kw">R2D2</span>(<span class="dt">mean_R2 =</span> <span class="fl">0.4</span>, <span class="dt">prec_R2 =</span> <span class="fl">2.5</span>, <span class="dt">cons_D2 =</span> <span class="dv">1</span>)),</span>
+<span id="cb27-6"><a href="#cb27-6" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb27-7"><a href="#cb27-7" aria-hidden="true"></a>  <span class="dt">chains =</span> <span class="dv">2</span>,</span>
+<span id="cb27-8"><a href="#cb27-8" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb27-9"><a href="#cb27-9" aria-hidden="true"></a>  <span class="dt">silent =</span> <span class="dv">2</span>,</span>
+<span id="cb27-10"><a href="#cb27-10" aria-hidden="true"></a>  <span class="dt">refresh =</span> <span class="dv">0</span></span>
+<span id="cb27-11"><a href="#cb27-11" aria-hidden="true"></a>)</span></code></pre></div>
+<p>The following code prepares the <code>cv_varsel()</code> run and the downstream <strong>projpred</strong> steps:</p>
+<div class="sourceCode" id="cb28"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true"></a>latent_ll_oscale_lnorm &lt;-<span class="st"> </span><span class="kw">structure</span>(<span class="cf">function</span>(</span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true"></a>    ilpreds,</span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true"></a>    <span class="dt">dis =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(ilpreds)),</span>
+<span id="cb28-4"><a href="#cb28-4" aria-hidden="true"></a>    y_oscale,</span>
+<span id="cb28-5"><a href="#cb28-5" aria-hidden="true"></a>    <span class="dt">wobs =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">ncol</span>(ilpreds)),</span>
+<span id="cb28-6"><a href="#cb28-6" aria-hidden="true"></a>    cens,</span>
+<span id="cb28-7"><a href="#cb28-7" aria-hidden="true"></a>    cl_ref,</span>
+<span id="cb28-8"><a href="#cb28-8" aria-hidden="true"></a>    <span class="dt">wdraws_ref =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">length</span>(cl_ref))</span>
+<span id="cb28-9"><a href="#cb28-9" aria-hidden="true"></a>) {</span>
+<span id="cb28-10"><a href="#cb28-10" aria-hidden="true"></a>  idxs_cens &lt;-<span class="st"> </span><span class="kw">which</span>(cens <span class="op">==</span><span class="st"> </span><span class="dv">1</span>)</span>
+<span id="cb28-11"><a href="#cb28-11" aria-hidden="true"></a>  idxs_event &lt;-<span class="st"> </span><span class="kw">setdiff</span>(<span class="kw">seq_along</span>(cens), idxs_cens)</span>
+<span id="cb28-12"><a href="#cb28-12" aria-hidden="true"></a>  wobs_mat &lt;-<span class="st"> </span><span class="kw">matrix</span>(wobs, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds),</span>
+<span id="cb28-13"><a href="#cb28-13" aria-hidden="true"></a>                     <span class="dt">byrow =</span> <span class="ot">TRUE</span>)</span>
+<span id="cb28-14"><a href="#cb28-14" aria-hidden="true"></a>  ll_unw &lt;-<span class="st"> </span><span class="kw">matrix</span>(<span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds))</span>
+<span id="cb28-15"><a href="#cb28-15" aria-hidden="true"></a>  <span class="cf">for</span> (idx_cens <span class="cf">in</span> idxs_cens) {</span>
+<span id="cb28-16"><a href="#cb28-16" aria-hidden="true"></a>    ll_unw[, idx_cens] &lt;-<span class="st"> </span><span class="kw">plnorm</span>(</span>
+<span id="cb28-17"><a href="#cb28-17" aria-hidden="true"></a>      y_oscale[idx_cens],</span>
+<span id="cb28-18"><a href="#cb28-18" aria-hidden="true"></a>      <span class="dt">meanlog =</span> ilpreds[, idx_cens],</span>
+<span id="cb28-19"><a href="#cb28-19" aria-hidden="true"></a>      <span class="dt">sdlog =</span> dis,</span>
+<span id="cb28-20"><a href="#cb28-20" aria-hidden="true"></a>      <span class="dt">lower.tail =</span> <span class="ot">FALSE</span>,</span>
+<span id="cb28-21"><a href="#cb28-21" aria-hidden="true"></a>      <span class="dt">log.p =</span> <span class="ot">TRUE</span></span>
+<span id="cb28-22"><a href="#cb28-22" aria-hidden="true"></a>    )</span>
+<span id="cb28-23"><a href="#cb28-23" aria-hidden="true"></a>  }</span>
+<span id="cb28-24"><a href="#cb28-24" aria-hidden="true"></a>  <span class="cf">for</span> (idx_event <span class="cf">in</span> idxs_event) {</span>
+<span id="cb28-25"><a href="#cb28-25" aria-hidden="true"></a>    ll_unw[, idx_event] &lt;-<span class="st"> </span><span class="kw">dlnorm</span>(</span>
+<span id="cb28-26"><a href="#cb28-26" aria-hidden="true"></a>      y_oscale[idx_event],</span>
+<span id="cb28-27"><a href="#cb28-27" aria-hidden="true"></a>      <span class="dt">meanlog =</span> ilpreds[, idx_event],</span>
+<span id="cb28-28"><a href="#cb28-28" aria-hidden="true"></a>      <span class="dt">sdlog =</span> dis,</span>
+<span id="cb28-29"><a href="#cb28-29" aria-hidden="true"></a>      <span class="dt">log =</span> <span class="ot">TRUE</span></span>
+<span id="cb28-30"><a href="#cb28-30" aria-hidden="true"></a>    )</span>
+<span id="cb28-31"><a href="#cb28-31" aria-hidden="true"></a>  }</span>
+<span id="cb28-32"><a href="#cb28-32" aria-hidden="true"></a>  <span class="kw">return</span>(wobs_mat <span class="op">*</span><span class="st"> </span>ll_unw)</span>
+<span id="cb28-33"><a href="#cb28-33" aria-hidden="true"></a>}, <span class="dt">cens_var =</span> <span class="op">~</span><span class="st"> </span>is_censored)</span>
+<span id="cb28-34"><a href="#cb28-34" aria-hidden="true"></a></span>
+<span id="cb28-35"><a href="#cb28-35" aria-hidden="true"></a>latent_ppd_oscale_lnorm &lt;-<span class="st"> </span><span class="cf">function</span>(</span>
+<span id="cb28-36"><a href="#cb28-36" aria-hidden="true"></a>    ilpreds_resamp,</span>
+<span id="cb28-37"><a href="#cb28-37" aria-hidden="true"></a>    <span class="dt">dis_resamp =</span> <span class="kw">rep</span>(<span class="ot">NA</span>, <span class="kw">nrow</span>(ilpreds_resamp)),</span>
+<span id="cb28-38"><a href="#cb28-38" aria-hidden="true"></a>    <span class="dt">wobs =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">ncol</span>(ilpreds_resamp)),</span>
+<span id="cb28-39"><a href="#cb28-39" aria-hidden="true"></a>    cl_ref,</span>
+<span id="cb28-40"><a href="#cb28-40" aria-hidden="true"></a>    <span class="dt">wdraws_ref =</span> <span class="kw">rep</span>(<span class="dv">1</span>, <span class="kw">length</span>(cl_ref)),</span>
+<span id="cb28-41"><a href="#cb28-41" aria-hidden="true"></a>    idxs_prjdraws</span>
+<span id="cb28-42"><a href="#cb28-42" aria-hidden="true"></a>) {</span>
+<span id="cb28-43"><a href="#cb28-43" aria-hidden="true"></a>  <span class="kw">warning</span>(<span class="st">&quot;The draws from this `latent_ppd_oscale` function are uncensored.&quot;</span>)</span>
+<span id="cb28-44"><a href="#cb28-44" aria-hidden="true"></a>  ppd &lt;-<span class="st"> </span><span class="kw">rlnorm</span>(</span>
+<span id="cb28-45"><a href="#cb28-45" aria-hidden="true"></a>    <span class="kw">prod</span>(<span class="kw">dim</span>(ilpreds_resamp)),</span>
+<span id="cb28-46"><a href="#cb28-46" aria-hidden="true"></a>    <span class="dt">meanlog =</span> ilpreds_resamp,</span>
+<span id="cb28-47"><a href="#cb28-47" aria-hidden="true"></a>    <span class="dt">sdlog =</span> dis_resamp</span>
+<span id="cb28-48"><a href="#cb28-48" aria-hidden="true"></a>  )</span>
+<span id="cb28-49"><a href="#cb28-49" aria-hidden="true"></a>  ppd &lt;-<span class="st"> </span><span class="kw">matrix</span>(ppd, <span class="dt">nrow =</span> <span class="kw">nrow</span>(ilpreds_resamp), <span class="dt">ncol =</span> <span class="kw">ncol</span>(ilpreds_resamp))</span>
+<span id="cb28-50"><a href="#cb28-50" aria-hidden="true"></a>  <span class="kw">return</span>(ppd)</span>
+<span id="cb28-51"><a href="#cb28-51" aria-hidden="true"></a>}</span>
+<span id="cb28-52"><a href="#cb28-52" aria-hidden="true"></a></span>
+<span id="cb28-53"><a href="#cb28-53" aria-hidden="true"></a>refm_lnorm &lt;-<span class="st"> </span><span class="kw">get_refmodel</span>(</span>
+<span id="cb28-54"><a href="#cb28-54" aria-hidden="true"></a>  refm_fit_lnorm,</span>
+<span id="cb28-55"><a href="#cb28-55" aria-hidden="true"></a>  <span class="dt">latent =</span> <span class="ot">TRUE</span>,</span>
+<span id="cb28-56"><a href="#cb28-56" aria-hidden="true"></a>  <span class="dt">latent_ll_oscale =</span> latent_ll_oscale_lnorm,</span>
+<span id="cb28-57"><a href="#cb28-57" aria-hidden="true"></a>  <span class="dt">latent_ppd_oscale =</span> latent_ppd_oscale_lnorm,</span>
+<span id="cb28-58"><a href="#cb28-58" aria-hidden="true"></a>  <span class="dt">dis =</span> <span class="kw">as.matrix</span>(refm_fit_lnorm)[, <span class="st">&quot;sigma&quot;</span>, <span class="dt">drop =</span> <span class="ot">FALSE</span>]</span>
+<span id="cb28-59"><a href="#cb28-59" aria-hidden="true"></a>)</span></code></pre></div>
+<p>The message concerning <code>latent_ilink</code> can be safely ignored here (the internal default based on <code>family$linkinv</code> works correctly in this case).</p>
+<p>Run <code>cv_varsel()</code>:</p>
+<div class="sourceCode" id="cb29"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true"></a><span class="co"># For running projpred&#39;s CV in parallel (see cv_varsel()&#39;s argument `parallel`):</span></span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true"></a><span class="co"># Note: Parallel processing is disabled during package building to avoid issues</span></span>
+<span id="cb29-3"><a href="#cb29-3" aria-hidden="true"></a>use_parallel &lt;-<span class="st"> </span><span class="ot">FALSE</span>  <span class="co"># Set to TRUE for actual parallel processing</span></span>
+<span id="cb29-4"><a href="#cb29-4" aria-hidden="true"></a><span class="cf">if</span> (use_parallel) {</span>
+<span id="cb29-5"><a href="#cb29-5" aria-hidden="true"></a>  doParallel<span class="op">::</span><span class="kw">registerDoParallel</span>(ncores)</span>
+<span id="cb29-6"><a href="#cb29-6" aria-hidden="true"></a>}</span>
+<span id="cb29-7"><a href="#cb29-7" aria-hidden="true"></a>cvvs_lnorm &lt;-<span class="st"> </span><span class="kw">cv_varsel</span>(</span>
+<span id="cb29-8"><a href="#cb29-8" aria-hidden="true"></a>  refm_lnorm,</span>
+<span id="cb29-9"><a href="#cb29-9" aria-hidden="true"></a>  <span class="co">### Only for the sake of speed (not recommended in general):</span></span>
+<span id="cb29-10"><a href="#cb29-10" aria-hidden="true"></a>  <span class="dt">method =</span> <span class="st">&quot;L1&quot;</span>,</span>
+<span id="cb29-11"><a href="#cb29-11" aria-hidden="true"></a>  <span class="dt">nloo =</span> <span class="kw">min</span>(N_surv, <span class="dv">10</span>),</span>
+<span id="cb29-12"><a href="#cb29-12" aria-hidden="true"></a>  <span class="dt">nterms_max =</span> <span class="dv">11</span>,</span>
+<span id="cb29-13"><a href="#cb29-13" aria-hidden="true"></a>  <span class="dt">nclusters_pred =</span> <span class="dv">20</span>,</span>
+<span id="cb29-14"><a href="#cb29-14" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb29-15"><a href="#cb29-15" aria-hidden="true"></a>  <span class="dt">parallel =</span> use_parallel,</span>
+<span id="cb29-16"><a href="#cb29-16" aria-hidden="true"></a>  <span class="co">### In interactive use, we recommend not to deactivate the verbose mode:</span></span>
+<span id="cb29-17"><a href="#cb29-17" aria-hidden="true"></a>  <span class="dt">verbose =</span> <span class="dv">0</span></span>
+<span id="cb29-18"><a href="#cb29-18" aria-hidden="true"></a>  <span class="co">###</span></span>
+<span id="cb29-19"><a href="#cb29-19" aria-hidden="true"></a>)</span>
+<span id="cb29-20"><a href="#cb29-20" aria-hidden="true"></a><span class="co"># Tear down the CV parallelization setup:</span></span>
+<span id="cb29-21"><a href="#cb29-21" aria-hidden="true"></a><span class="cf">if</span> (use_parallel) {</span>
+<span id="cb29-22"><a href="#cb29-22" aria-hidden="true"></a>  doParallel<span class="op">::</span><span class="kw">stopImplicitCluster</span>()</span>
+<span id="cb29-23"><a href="#cb29-23" aria-hidden="true"></a>  foreach<span class="op">::</span><span class="kw">registerDoSEQ</span>()</span>
+<span id="cb29-24"><a href="#cb29-24" aria-hidden="true"></a>}</span></code></pre></div>
+<p>In this case, we will ignore the warnings about high Pareto-<span class="math inline">\(\hat{k}\)</span> values because we chose quite rough settings (e.g., only 2 MCMC chains) in this vignette (for technical reasons). We will also ignore the warning that SIS is used (instead of PSIS) because this is due to <code>nclusters_pred = 20</code> which we used only to speed up the building of the vignette.</p>
+<p>Plot the results:</p>
+<div class="sourceCode" id="cb30"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true"></a><span class="kw">plot</span>(cvvs_lnorm, <span class="dt">stats =</span> <span class="st">&quot;mlpd&quot;</span>, <span class="dt">deltas =</span> <span class="ot">TRUE</span>)</span></code></pre></div>
+<p>Hence, the truly relevant predictors are identified correctly.</p>
+<p>Project onto the submodel consisting of the first <code>n_pred_truth</code> predictors and perform a “posterior-projection predictive check” (PPPC):</p>
+<div class="sourceCode" id="cb31"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true"></a>predictors_final_lnorm &lt;-<span class="st"> </span><span class="kw">head</span>(<span class="kw">ranking</span>(cvvs_lnorm)[[<span class="st">&quot;fulldata&quot;</span>]], n_pred_truth)</span>
+<span id="cb31-2"><a href="#cb31-2" aria-hidden="true"></a>prj_lnorm &lt;-<span class="st"> </span><span class="kw">project</span>(refm_lnorm, <span class="dt">predictor_terms =</span> predictors_final_lnorm)</span>
+<span id="cb31-3"><a href="#cb31-3" aria-hidden="true"></a>prj_predict_lnorm &lt;-<span class="st"> </span><span class="kw">proj_predict</span>(prj_lnorm)</span>
+<span id="cb31-4"><a href="#cb31-4" aria-hidden="true"></a>bayesplot<span class="op">::</span><span class="kw">ppc_km_overlay</span>(<span class="dt">y =</span> dat_sim_lnorm<span class="op">$</span>yobs, <span class="dt">yrep =</span> prj_predict_lnorm,</span>
+<span id="cb31-5"><a href="#cb31-5" aria-hidden="true"></a>                          <span class="dt">status_y =</span> <span class="dv">1</span> <span class="op">-</span><span class="st"> </span>dat_sim_lnorm<span class="op">$</span>is_censored)</span></code></pre></div>
+<p>As expected, this PPPC indicates that this submodel is a reasonable one (keeping in mind that such a PPPC is just a single model-diagnostic tool).</p>
+</div>
+</div>
+<div id="references" class="section level2 unnumbered">
+<h2 class="unnumbered">References</h2>
+<div id="refs" class="references hanging-indent">
+<div id="ref-catalina_latent_2021">
+<p>Catalina, Alejandro, Paul Bürkner, and Aki Vehtari. 2021. “Latent Space Projection Predictive Inference.” arXiv. <a href="https://doi.org/10.48550/arXiv.2109.04702">https://doi.org/10.48550/arXiv.2109.04702</a>.</p>
+</div>
+<div id="ref-cover_elements_1991">
+<p>Cover, Thomas M., and Joy A. Thomas. 1991. <em>Elements of Information Theory</em>. New York, NY, USA: John Wiley &amp; Sons, Ltd. <a href="https://doi.org/10.1002/0471200611">https://doi.org/10.1002/0471200611</a>.</p>
+</div>
+<div id="ref-jorgensen_exponential_1987">
+<p>Jørgensen, Bent. 1987. “Exponential Dispersion Models.” <em>Journal of the Royal Statistical Society. Series B (Methodological)</em> 49 (2): 127–62.</p>
+</div>
+<div id="ref-mccullagh_generalized_1989">
+<p>McCullagh, P., and J. A. Nelder. 1989. <em>Generalized Linear Models</em>. 2nd ed. London: Chapman &amp; Hall.</p>
+</div>
+<div id="ref-piironen_projective_2020">
+<p>Piironen, Juho, Markus Paasiniemi, and Aki Vehtari. 2020. “Projective Inference in High-Dimensional Problems: Prediction and Feature Selection.” <em>Electronic Journal of Statistics</em> 14 (1): 2155–97. <a href="https://doi.org/10.1214/20-EJS1711">https://doi.org/10.1214/20-EJS1711</a>.</p>
+</div>
+<div id="ref-piironen_sparsity_2017">
+<p>Piironen, Juho, and Aki Vehtari. 2017. “Sparsity Information and Regularization in the Horseshoe and Other Shrinkage Priors.” <em>Electronic Journal of Statistics</em> 11 (2): 5018–51. <a href="https://doi.org/10.1214/17-EJS1337SI">https://doi.org/10.1214/17-EJS1337SI</a>.</p>
+</div>
+<div id="ref-weber_projection_2025">
+<p>Weber, Frank, Änne Glass, and Aki Vehtari. 2025. “Projection Predictive Variable Selection for Discrete Response Families with Finite Support.” <em>Computational Statistics</em> 40 (2): 701–21. <a href="https://doi.org/10.1007/s00180-024-01506-0">https://doi.org/10.1007/s00180-024-01506-0</a>.</p>
+</div>
+</div>
+</div>
+<div class="footnotes">
+<hr />
+<ol>
+<li id="fn1"><p><span class="citation">Jørgensen (<a href="#ref-jorgensen_exponential_1987" role="doc-biblioref">1987</a>)</span> himself only uses the term “exponential dispersion model”, but the discussion for that article mentions the term “ED [i.e., exponential dispersion] family”. <span class="citation">Jørgensen (<a href="#ref-jorgensen_exponential_1987" role="doc-biblioref">1987</a>)</span> also introduces the class of <em>discrete exponential dispersion</em> families (here abbreviated by “DED families”), see section <a href="#negbinex">“Example: Negative binomial distribution”</a>.<a href="#fnref1" class="footnote-back">↩︎</a></p></li>
+<li id="fn2"><p>The latent predictors are also known as the linear predictors, but “latent” is a more general term than “linear”.<a href="#fnref2" class="footnote-back">↩︎</a></p></li>
+<li id="fn3"><p>If the <code>refmodel</code>-class object is not defined explicitly but implicitly by a call to a top-level function such as <code>project()</code>, <code>varsel()</code>, or <code>cv_varsel()</code>, then <code>latent = TRUE</code> and all other arguments related to the latent projection need to be set in <em>each</em> call to a top-level function.<a href="#fnref3" class="footnote-back">↩︎</a></p></li>
+<li id="fn4"><p>More precisely, the latent projection <em>replaces</em> the KL divergence minimization problem in the original response space by a KL divergence minimization problem in the latent space and solves the latter.<a href="#fnref4" class="footnote-back">↩︎</a></p></li>
+<li id="fn5"><p>Here, “exact” means apart from approximations and simplifications which are also undertaken for the traditional projection.<a href="#fnref5" class="footnote-back">↩︎</a></p></li>
+<li id="fn6"><p>The negative binomial distribution belongs to the class of <em>discrete exponential dispersion</em> families <span class="citation">(Jørgensen <a href="#ref-jorgensen_exponential_1987" role="doc-biblioref">1987</a>)</span> (here abbreviated by “DED families”). DED families are closely related to ED families <span class="citation">(Jørgensen <a href="#ref-jorgensen_exponential_1987" role="doc-biblioref">1987</a>)</span>, but strictly speaking, the class of DED families is not a subset of the class of ED families. GitHub issue <a href="https://github.com/stan-dev/projpred/issues/361">#361</a> explains why the “traditional” projection onto a DED-family submodel is currently not implemented in <strong>projpred</strong>.<a href="#fnref6" class="footnote-back">↩︎</a></p></li>
+<li id="fn7"><p>The suffix <code>_prec</code> in <code>refm_prec</code> stands for “precision” because here, we follow the Stan convention (see the Stan documentation for the <code>neg_binomial_2</code> distribution, the <code>brms::negbinomial()</code> documentation, and the <a href="https://paulbuerkner.com/brms/"><strong>brms</strong></a> vignette <a href="https://paulbuerkner.com/brms/articles/brms_families.html">“Parameterization of Response Distributions in brms”</a>) and prefer the term <em>precision</em> parameter for what is denoted by <span class="math inline">\(\phi\)</span> there (confusingly, argument <code>size</code> in <code>?stats::NegBinomial</code>—which is the same as <span class="math inline">\(\phi\)</span> from the Stan notation—is called the <em>dispersion</em> parameter there, although the variance is increased by its reciprocal).<a href="#fnref7" class="footnote-back">↩︎</a></p></li>
+<li id="fn8"><p>Briefly, the variable mentioned in the <code>cens_var</code> right-hand side formula needs to contain the censoring indicators (e.g., <code>0</code> = uncensored, <code>1</code> = censored) which can then be used within the custom <code>latent_ll_oscale</code> function via its argument <code>cens</code>.<a href="#fnref8" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>
