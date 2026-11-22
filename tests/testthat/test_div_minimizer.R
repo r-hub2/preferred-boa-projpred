@@ -1,9 +1,6 @@
-context("div_minimizer")
-
-# Setup -------------------------------------------------------------------
-
-# Needed to clean up the workspace afterwards (i.e, after this test file):
-ls_bu <- ls()
+# The divmin() and the divmin_augdat() test store their `brnll` results here for
+# the comparison test at the end of this file:
+outdmin_brnll <- new.env()
 
 # divmin() ----------------------------------------------------------------
 
@@ -88,7 +85,7 @@ test_that("divmin() works", {
                    with_offs = grepl("\\.with_offs", tstsetup),
                    info_str = tstsetup)
   }
-  assign("outdmin_brnll_trad", outdmin_brnll_tmp, envir = .GlobalEnv)
+  outdmin_brnll$trad <- outdmin_brnll_tmp
 })
 
 # divmin_augdat() ---------------------------------------------------------
@@ -167,12 +164,9 @@ test_that("divmin_augdat() works", {
         "length > 1"
       )
     } else if (fam_crr == "categ" && mod_crr == "glmm") {
-      warn_expected <- if (packageVersion("mclogit") >= "0.9.6") {
-        "Inner iterations did not coverge"
-      } else {
-        paste0("^step size truncated due to possible divergence$|",
-               "^Algorithm stopped due to false convergence$")
-      }
+      # categ_pql_fit() does not converge for these test data:
+      warn_expected <- paste0("^Inner iterations did not converge|",
+                              "^Algorithm did not converge$")
     } else {
       warn_expected <- NA
     }
@@ -214,7 +208,7 @@ test_that("divmin_augdat() works", {
                    check_y_from_resp = FALSE,
                    info_str = tstsetup)
   }
-  assign("outdmin_brnll_augdat", outdmin_brnll_tmp, envir = .GlobalEnv)
+  outdmin_brnll$augdat <- outdmin_brnll_tmp
 })
 
 # Comparison of divmin() and divmin_augdat() ------------------------------
@@ -224,29 +218,22 @@ test_that(paste(
   "`brnll` family)"
 ), {
   skip_on_cran()
-  for (tstsetup in names(outdmin_brnll_augdat)) {
+  skip_if(is.null(outdmin_brnll$trad) || is.null(outdmin_brnll$augdat),
+          "the divmin() or the divmin_augdat() test did not finish")
+  skip_if_no_setups(outdmin_brnll$augdat)
+  for (tstsetup in names(outdmin_brnll$augdat)) {
     args_ref_i <- args_ref[[tstsetup]]
-    outdmin_augdat <- outdmin_brnll_augdat[[tstsetup]]
-    outdmin_trad <- outdmin_brnll_trad[[args_ref_i$tstsetup_fit]]
+    outdmin_augdat <- outdmin_brnll$augdat[[tstsetup]]
+    outdmin_trad <- outdmin_brnll$trad[[args_ref_i$tstsetup_fit]]
     expect_length(outdmin_augdat, 1)
     expect_length(outdmin_trad, 1)
     tol_coefs <- ifelse(args_ref_i$mod_nm == "glmm", 1e-4, 1e-5)
     coefs_aug <- get_subparams(outdmin_augdat[[1]], nm_scheme = "rstanarm")
     coefs_trad <- get_subparams(outdmin_trad[[1]], nm_scheme = "rstanarm")
-    if (!identical(is.na(coefs_aug), is.na(coefs_trad))) {
-      # There is at least one case where the traditional projection is not able
-      # to estimate a correlation of -1:
-      expect_true(all(coefs_aug[is.na(coefs_trad)] %in% c(-1, 1)),
-                  info = tstsetup)
-      coefs_aug <- coefs_aug[!is.na(coefs_trad)]
-      coefs_trad <- coefs_trad[!is.na(coefs_trad)]
-    }
+    # With `nm_scheme = "rstanarm"`, the variance components are variances and
+    # covariances, so a singular fit gives no NaN correlation here:
+    expect_false(anyNA(coefs_trad), info = tstsetup)
     expect_equal(coefs_aug, coefs_trad, tolerance = tol_coefs,
                  info = tstsetup)
   }
 })
-
-# Teardown ----------------------------------------------------------------
-
-# Clean up the workspace:
-rm(list = setdiff(ls(), ls_bu))

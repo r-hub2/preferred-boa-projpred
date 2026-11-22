@@ -2,13 +2,6 @@
 
 ## Traditional (and latent) projection ------------------------------------
 
-# Needed to avoid a NOTE in `R CMD check`:
-if (getRversion() >= package_version("2.15.1")) {
-  utils::globalVariables("formula_s")
-  utils::globalVariables("projpred_var_s")
-  utils::globalVariables("projpred_formula_no_random_s")
-}
-
 divmin <- function(
     formula,
     projpred_var,
@@ -70,12 +63,82 @@ divmin <- function(
     projpred_random <- formula_random$random
   }
   formulas <- validate_response_formula(formula)
+  # Gaussian multilevel submodels: one lFormula() for all draws (see
+  # lmer_shared_callback()). The options and the lme4 check run here, because
+  # the draw-wise calls may run in parallel workers:
+  if (identical(sdivmin, fit_glmer_callback) && length(formulas) > 1 &&
+      !getOption("projpred.PQL", FALSE) &&
+      getOption("projpred.gaussian_not_as_generalized", TRUE) &&
+      identical(list(...)$family$family, "gaussian") &&
+      identical(list(...)$family$link, "identity") &&
+      getOption("projpred.lmer_shared", TRUE) && lmer_shared_ok()) {
+    sdivmin <- shared_setup_callback(lmer_shared_callback, formulas, sdivmin)
+  }
+  # Additive submodels without group-level terms: one mgcv setup for all draws
+  # (see gam_shared_callback()):
+  if (identical(sdivmin, fit_gam_callback) && length(formulas) > 1 &&
+      getOption("projpred.gam_shared", TRUE)) {
+    sdivmin <- shared_setup_callback(gam_shared_callback, formulas, sdivmin)
+  }
   if (is.list(projpred_formulas_no_random)) {
     stopifnot(length(projpred_formulas_no_random) == length(formulas))
   } else {
     projpred_formulas_no_random <- as.list(
       rep(projpred_formulas_no_random, length(formulas))
     )
+  }
+  # projpred's own GLM fitter throws only R conditions, so its messages and
+  # warnings can be collected by condition handlers, which is faster than
+  # diverting the message stream. Other fitters keep capt_mssgs_warns():
+  if (identical(sdivmin, fit_glm_ridge_callback)) {
+    capt_fun <- capt_conds
+  } else {
+    capt_fun <- capt_mssgs_warns
+  }
+  # The draw-wise formulas of a non-multilevel non-additive submodel differ only
+  # in the response, so fit_glm_ridge_callback() can use one model matrix for
+  # all draws (and the joint Gaussian solve can fit them, also for a single
+  # draw):
+  if (identical(sdivmin, fit_glm_ridge_callback) && length(formulas) >= 1) {
+    shared_x <- shared_model_matrix(formulas, data = list(...)$data)
+    if (!is.null(shared_x)) {
+      outdmin <- divmin_multi(formulas, shared_x = shared_x,
+                              dot_args = list(...),
+                              throw_warn_sdivmin = throw_warn_sdivmin,
+                              do_check_conv = do_check_conv)
+      if (!is.null(outdmin)) {
+        return(outdmin)
+      }
+      sdivmin <- glm_ridge_callback_shared(shared_x)
+    }
+  }
+
+  dot_args <- list(...)
+  # The option of the Laplace fit (see mlvl_laplace()) is read here, because the
+  # draw-wise calls may run in parallel workers:
+  if (identical(sdivmin, fit_glmer_callback)) {
+    dot_args$mlvl_laplace <- getOption("projpred.mlvl_laplace", TRUE)
+  }
+  # Observations with weight 0 (in the LOO CV with validated search, the
+  # left-out observation of a fold): remove them from the data for the
+  # multilevel and additive submodel fitters. Some of these fitters (for example
+  # lme4::lmer()) do not ignore the response of an observation with weight 0,
+  # and others (mgcv::gam()) use its predictor values for the smooth bases. The
+  # GLM fitters handle weight 0 exactly, except that the data-dependent bases
+  # (for example, the knots of splines::ns()) still use its predictor values.
+  # If `weights` and `data` differ in length (not in projpred's own calls),
+  # nothing is removed.
+  lost_lvls <- NULL
+  if ((has_grp || has_add) &&
+      is.data.frame(dot_args$data) && length(dot_args$weights) > 0 &&
+      any(dot_args$weights == 0) &&
+      length(dot_args$weights) == nrow(dot_args$data)) {
+    keep <- dot_args$weights != 0
+    lost_lvls <- lost_levels(dot_args$data, keep = keep, formula = formula)
+    dot_args$data <- drop_lost_levels(dot_args$data[keep, , drop = FALSE],
+                                      lost_lvls)
+    dot_args$weights <- dot_args$weights[keep]
+    projpred_var <- projpred_var[keep, , drop = FALSE]
   }
 
   if (is.null(getOption("projpred.parallel_proj_trigger")) &&
@@ -89,11 +152,12 @@ divmin <- function(
   } else {
     prll_prj_trigger <- getOption("projpred.parallel_proj_trigger", Inf)
   }
-  if (length(formulas) < prll_prj_trigger) {
-    # Sequential case. Actually, we could simply use ``%do_projpred%` <-
-    # foreach::`%do%`` here and then proceed as in the parallel case, but that
-    # would require adding more "hard" dependencies (because packages 'foreach'
-    # and 'iterators' would have to be moved from `Suggests:` to `Imports:`).
+  # The backend of the parallel case (`NULL` without parallel workers):
+  backend <- if (length(formulas) >= prll_prj_trigger) {
+    par_backend(warn_once = TRUE)
+  }
+  if (is.null(backend)) {
+    # Sequential case.
     if (verbose_divmin) {
       pb <- utils::txtProgressBar(min = 0, max = length(formulas), style = 3,
                                   initial = 0, file = stderr())
@@ -103,46 +167,24 @@ divmin <- function(
       if (verbose_divmin) {
         on.exit(utils::setTxtProgressBar(pb, s))
       }
-      mssgs_warns_capt <- capt_mssgs_warns(
-        soutdmin <- sdivmin(
-          formula = formulas[[s]],
-          projpred_var = projpred_var[, s, drop = FALSE],
-          projpred_formula_no_random = projpred_formulas_no_random[[s]],
-          projpred_random = projpred_random,
-          ...
-        )
+      mssgs_warns_capt <- capt_fun(
+        soutdmin <- do.call(sdivmin, c(
+          list(formula = formulas[[s]],
+               projpred_var = projpred_var[, s, drop = FALSE],
+               projpred_formula_no_random = projpred_formulas_no_random[[s]],
+               projpred_random = projpred_random),
+          dot_args
+        ))
       )
-      return(nlist(soutdmin, mssgs_warns_capt))
+      return(nlist(soutdmin = strip_call_data(soutdmin), mssgs_warns_capt))
     })
   } else {
-    # Parallel case.
-    if (!requireNamespace("foreach", quietly = TRUE)) {
-      stop("Please install the 'foreach' package.")
-    }
-    if (!requireNamespace("iterators", quietly = TRUE)) {
-      stop("Please install the 'iterators' package.")
-    }
-    if (verbose_divmin && use_progressr()) {
-      progressor_obj <- progressr::progressor(length(formulas))
-    } else {
-      progressor_obj <- NULL
-    }
-    dot_args <- list(...)
-    `%do_projpred%` <- foreach::`%dopar%`
-    outdmin <- foreach::foreach(
-      formula_s = formulas,
-      projpred_var_s = iterators::iter(projpred_var, by = "column"),
-      projpred_formula_no_random_s = projpred_formulas_no_random,
-      .packages = c("projpred"),
-      .export = c("sdivmin", "projpred_random", "dot_args", "progressor_obj"),
-      .noexport = c(
-        "object", "p_sel", "search_path", "p_ref", "refmodel", "formulas",
-        "projpred_var", "projpred_ws_aug", "projpred_formulas_no_random"
-      ),
-      .errorhandling = getOption("projpred.foreach_errorhandling", "stop"),
-      .verbose = getOption("projpred.foreach_verbose", FALSE)
-    ) %do_projpred% {
-      mssgs_warns_capt <- capt_mssgs_warns(
+    # Parallel case. The projection of one draw, in an environment with only
+    # the objects that it uses (see fun_with_objs()) and the projpred
+    # namespace as parent:
+    one_draw <- fun_with_objs(function(formula_s, projpred_var_s,
+                                       projpred_formula_no_random_s) {
+      mssgs_warns_capt <- capt_fun(
         soutdmin <- do.call(
           sdivmin,
           c(list(formula = formula_s,
@@ -152,16 +194,477 @@ divmin <- function(
             dot_args)
         )
       )
-      if (!is.null(progressor_obj)) progressor_obj()
-      return(nlist(soutdmin, mssgs_warns_capt))
-    }
+      return(nlist(soutdmin = strip_call_data(soutdmin), mssgs_warns_capt))
+    }, c("sdivmin", "projpred_random", "dot_args", "capt_fun"))
+    args_draws <- lapply(seq_along(formulas), function(s) {
+      list(formula_s = formulas[[s]],
+           projpred_var_s = projpred_var[, s, drop = FALSE],
+           projpred_formula_no_random_s = projpred_formulas_no_random[[s]])
+    })
+    outdmin <- par_lapply(args_draws, call_with_args, .fun = one_draw,
+                          .backend = backend, .progress = verbose_divmin)
   }
   mssgs_warns_capts <- lapply(outdmin, "[[", "mssgs_warns_capt")
   outdmin <- lapply(outdmin, "[[", "soutdmin")
   mssgs_warns_capts <- lapply(mssgs_warns_capts, filter_mssgs_warns)
   warn_prj_drawwise(mssgs_warns_capts, throw_warn = throw_warn_sdivmin)
   check_conv(outdmin, lengths(mssgs_warns_capts), do_check = do_check_conv)
+  attr(outdmin, "projpred_lost_lvls") <- lost_lvls
   return(outdmin)
+}
+
+# Draw-wise divergence minimizer for divmin() that builds the shared setup
+# (`make_shared`: lmer_shared_callback() or gam_shared_callback())
+# from the arguments of its first call. The setup then uses the data of the
+# draw-wise fits, also if divmin() changes the data before these fits. A call
+# with other data, or a setup that does not apply, uses `sdivmin_plain`. The
+# setup is built once, or once per task in parallel runs.
+shared_setup_callback <- function(make_shared, formulas, sdivmin_plain) {
+  # Force the arguments: divmin() assigns the result to `sdivmin`, so a
+  # promise for `sdivmin_plain` would return this function (infinite
+  # recursion):
+  force(sdivmin_plain)
+  force(make_shared)
+  force(formulas)
+  sdivmin_shared <- NULL
+  data_shared <- NULL
+  done <- FALSE
+  return(function(formula, ...) {
+    if (!done) {
+      done <<- TRUE
+      dot_args <- list(...)
+      sdivmin_shared <<- make_shared(formulas, dot_args = dot_args)
+      data_shared <<- dot_args[["data"]]
+    }
+    # identical() returns fast if both are the same object (the usual case):
+    if (is.null(sdivmin_shared) ||
+        !identical(list(...)[["data"]], data_shared)) {
+      return(sdivmin_plain(formula = formula, ...))
+    }
+    return(sdivmin_shared(formula = formula, ...))
+  })
+}
+
+# Additive submodels (mgcv::gam()) of all draws of one projection
+# ---------------------------------------------------------------
+#
+# The draw-wise formulas differ only in the response, so all draws can share the
+# setup of mgcv::gam() (model frame, smooth bases and penalties;
+# mgcv::gam(fit = FALSE)). gam_shared_callback() fits each draw with
+# mgcv::gam(G = ), the public interface for a prepared setup, with the response
+# of the draw and the estimation arguments of the call. It sets the elements of
+# the fit that contain the response name (`formula`, `terms`, `pterms`, `model`,
+# `pred.formula`) and `call` as in a fit by fit_gam_callback(), so the fits are
+# equal (all.equal()) to those of fit_gam_callback().
+
+# Draw-wise divergence minimizer for divmin() that uses one mgcv::gam() setup
+# for all draws, or `NULL` if this does not apply.
+gam_shared_callback <- function(formulas, dot_args) {
+  if (!getOption("projpred.gam_shared", TRUE)) {
+    return(NULL)
+  }
+  data <- dot_args$data
+  resp_nms <- vapply(formulas, function(fml) {
+    if (is.name(fml[[2]])) as.character(fml[[2]]) else NA_character_
+  }, character(1))
+  if (!is.data.frame(data) || anyNA(resp_nms) ||
+      !all(resp_nms %in% names(data)) || anyNA(data[resp_nms])) {
+    return(NULL)
+  }
+  # As in fit_gam_callback():
+  gam_dot_args <- dot_args[intersect(names(dot_args),
+                                     methods::formalArgs(mgcv::gam))]
+  if (any(c("G", "fit") %in% names(gam_dot_args))) {
+    return(NULL)
+  }
+  g_setup <- tryCatch(
+    do.call(mgcv::gam, c(list(formula = formulas[[1]]), gam_dot_args,
+                         list(fit = FALSE))),
+    error = function(e) NULL
+  )
+  if (is.null(g_setup) || length(g_setup$y) != nrow(data)) {
+    return(NULL)
+  }
+  # With `G`, mgcv::gam() takes the arguments of the estimation from its call,
+  # not from `G` (`data` only for `control$keepData`). The setup already
+  # contains `sp`; a second `sp` stops with an error.
+  est_args <- gam_dot_args[intersect(
+    names(gam_dot_args),
+    c("method", "optimizer", "control", "scale", "gamma", "in.out", "nei",
+      "data")
+  )]
+  resp_old <- resp_nms[1]
+  return(function(formula, ...) {
+    resp_new <- as.character(formula[[2]])
+    tryCatch({
+      g_s <- g_setup
+      g_s$y <- data[[resp_new]]
+      g_s$mf[[resp_old]] <- data[[resp_new]]
+      fit <- do.call(mgcv::gam, c(list(G = g_s), est_args))
+      if (resp_new != resp_old) {
+        for (el in c("formula", "terms", "pterms", "model", "pred.formula")) {
+          if (!is.null(fit[[el]])) {
+            fit[[el]] <- rename_sym(fit[[el]], resp_old, resp_new)
+          }
+        }
+      }
+      fit$call <- match.call(mgcv::gam, as.call(c(
+        list(mgcv::gam), list(formula = formula), gam_dot_args
+      )))
+      fit
+    }, error = function(e) fit_gam_callback(formula = formula, ...))
+  })
+}
+
+# Linear predictors of `gam` fits (without group-level terms) of the same
+# submodel for `newdata`, from one linear-predictor matrix (predict.gam() with
+# `type = "lpmatrix"`) for all draws, instead of one predict.gam() call per
+# draw. Returns `NULL` for other cases.
+subprd_gam_direct <- function(fits, newdata) {
+  if (is.null(newdata) || length(fits) < 2 ||
+      !all(vapply(fits, function(fit) {
+        inherits(fit, "gam") && !inherits(fit, "gamm4")
+      }, logical(1)))) {
+    return(NULL)
+  }
+  if (!gam_same_submodel(fits)) {
+    return(NULL)
+  }
+  x_lp <- stats::predict(fits[[1]], newdata = newdata, type = "lpmatrix")
+  prd <- x_lp %*% do.call(cbind, lapply(fits, stats::coef))
+  dimnames(prd) <- list(rownames(x_lp), NULL)
+  return(prd)
+}
+
+# Whether the `gam` fits `fits` have the same parametric terms, smooths and
+# coefficient names and no offset, so that one linear-predictor matrix
+# (predict.gam() with `type = "lpmatrix"`) serves all of them.
+gam_same_submodel <- function(fits) {
+  fit_1 <- fits[[1]]
+  terms_noenv <- function(trms) {
+    trms <- delete.response(trms)
+    attr(trms, ".Environment") <- NULL
+    trms
+  }
+  trms_1 <- terms_noenv(fit_1$pterms)
+  smooth_1 <- fit_1$smooth
+  if (!all(vapply(fits, function(fit) {
+    identical(terms_noenv(fit$pterms), trms_1) &&
+      identical(fit$smooth, smooth_1) &&
+      identical(names(stats::coef(fit)), names(stats::coef(fit_1)))
+  }, logical(1)))) {
+    return(FALSE)
+  }
+  return(!length(attr(fit_1$terms, "offset")) &&
+           !length(attr(fit_1$pterms, "offset")))
+}
+
+# Linear predictors of `gamm4` fits of the same submodel for `newdata`, as from
+# predict.gamm4() for each fit. The population-level part comes from one
+# linear-predictor matrix of the `gam` components for all draws (as in
+# subprd_gam_direct()). The group-level part comes from one random-effects
+# design for all draws (see gamm4_re_prep()); the draws for new group levels
+# come in the same order as from predict.gamm4(). Returns `NULL` if the fits
+# differ in the population-level terms (see gam_same_submodel()), the factor
+# levels of the `gam` components, the group-level formula or the group levels,
+# if there is an offset, and for fits without group-level terms.
+subprd_gamm4_direct <- function(fits, newdata) {
+  if (is.null(newdata) || length(fits) == 0 ||
+      !all(vapply(fits, function(fit) {
+        inherits(fit, "gamm4") && !is.null(fit$random)
+      }, logical(1)))) {
+    return(NULL)
+  }
+  gams <- lapply(fits, "[[", "gam")
+  if (!gam_same_submodel(gams)) {
+    return(NULL)
+  }
+  fit_1 <- fits[[1]]
+  fml_noenv <- function(fml) {
+    attr(fml, ".Environment") <- NULL
+    fml
+  }
+  random_1 <- fml_noenv(fit_1$random)
+  xlevels_1 <- fit_1$gam$xlevels
+  if (!all(vapply(fits, function(fit) {
+    identical(fml_noenv(fit$random), random_1) &&
+      identical(fit$gam$xlevels, xlevels_1)
+  }, logical(1)))) {
+    return(NULL)
+  }
+  vnms <- gamm4_re_vnms(fit_1)
+  ranefs <- lapply(fits, function(fit) {
+    lme4::ranef(fit$mer, condVar = FALSE)[vnms]
+  })
+  dimnames_1 <- lapply(ranefs[[1]], dimnames)
+  if (!all(vapply(ranefs, function(ranef_s) {
+    identical(lapply(ranef_s, dimnames), dimnames_1)
+  }, logical(1)))) {
+    return(NULL)
+  }
+  # The population-level part first, as in predict.gamm4():
+  x_lp <- stats::predict(gams[[1]], newdata = newdata, type = "lpmatrix")
+  prep <- gamm4_re_prep(fit_1, newdata = newdata, ranef_tmp = ranefs[[1]])
+  bs <- do.call(cbind, Map(function(fit, ranef_s) {
+    gamm4_re_b(fit, prep = prep, ranef_tmp = ranef_s)
+  }, fits, ranefs))
+  prd <- x_lp %*% do.call(cbind, lapply(gams, stats::coef)) +
+    as(Matrix::crossprod(prep$Zt, bs), "matrix")
+  # As cbind() of the outputs of predict.gamm4():
+  dimnames(prd) <- NULL
+  return(prd)
+}
+
+# Gaussian multilevel submodels (lme4::lmer()) of all draws of one projection
+# --------------------------------------------------------------------------
+#
+# lme4::lmer() is lme4::lFormula() (model frame, fixed-effects model matrix,
+# random-effects structure), followed by mkLmerDevfun(), optimizeLmer(),
+# checkConv() and mkMerMod(). The draw-wise formulas of one submodel differ only
+# in the response, so all draws can share one lFormula() result.
+# lmer_shared_fit() repeats the other steps of lmer() for one draw: it
+# transcribes these steps of lmer() in lme4 2.0-1 to 2.1-0 (R package lme4,
+# GPL (>= 2); see the file LICENSE). lme4's C++ objects change some vectors of
+# the lFormula() result in place, so each draw gets fresh copies of them. The
+# fits are equal (all.equal()) to those of lmer(), and so are the attributes of
+# their model frames without their environments (lmer_frame_attrs()); the
+# shared fits keep the formula environment of the first draw. lmer_shared_ok()
+# checks this once per R session on a small fixed problem, and the test suite
+# checks it on CRAN. If the check fails (for example after a change in lme4),
+# divmin() fits each draw with lmer().
+
+# Replaces the name `old` by `new` in all language objects of `x`, including
+# its attributes and names (used for the response of a shared model frame).
+# In attributes, it also replaces character elements equal to `old` (for
+# example, attribute "varnames.fixed" of the terms of an lme4 model frame,
+# which model.frame(<merMod>, fixed.only = TRUE) uses for predictions). This
+# requires that no other character attribute value (for example a term label or
+# a class name in "dataClasses") equals `old`, which holds for the response
+# names of the draws (".<response>.<draw>").
+rename_sym <- function(x, old, new) {
+  if (is.name(x)) {
+    if (identical(x, as.name(old))) {
+      return(as.name(new))
+    }
+    return(x)
+  }
+  if (is.call(x) || is.pairlist(x) || (is.list(x) && !is.data.frame(x))) {
+    at <- attributes(x)
+    for (i in seq_along(x)) {
+      if (!is.null(x[[i]])) {
+        x[[i]] <- rename_sym(x[[i]], old, new)
+      }
+    }
+    attributes(x) <- at
+  }
+  at <- attributes(x)
+  if (!is.null(at)) {
+    for (nm in setdiff(names(at), c("names", "dim", "dimnames", "row.names",
+                                    "class"))) {
+      at_nm <- rename_sym(at[[nm]], old, new)
+      if (is.character(at_nm)) {
+        at_nm[at_nm %in% old] <- new
+      }
+      attr(x, nm) <- at_nm
+    }
+    if (!is.null(at$names)) {
+      names(x)[names(x) %in% old] <- new
+    }
+    if (!is.null(at$dimnames)) {
+      attr(x, "dimnames") <- lapply(at$dimnames, function(dnms) {
+        if (!is.null(dnms)) {
+          dnms[dnms %in% old] <- new
+        }
+        dnms
+      })
+    }
+  }
+  return(x)
+}
+
+# Fits the lmer() submodel `formula` (response: a column of `data`) from the
+# shared lFormula() result `lmod0` (of the same submodel for another draw).
+# `lmer_args` are the arguments of the lmer() call that this fit replaces.
+lmer_shared_fit <- function(lmod0, formula, data, control, lmer_args) {
+  resp_old <- as.character(lmod0$formula[[2]])
+  resp_new <- as.character(formula[[2]])
+  lmod <- lmod0
+  # Fresh copies of the vectors that lme4's C++ objects change in place:
+  lmod$reTrms$Lambdat@x <- lmod0$reTrms$Lambdat@x + 0
+  lmod$reTrms$theta <- lmod0$reTrms$theta + 0
+  lmod$reTrms$Zt@x <- lmod0$reTrms$Zt@x + 0
+  lmod$X <- lmod0$X + 0
+  fr <- lmod$fr
+  fr[[resp_old]] <- data[[resp_new]]
+  if (resp_new != resp_old) {
+    fr <- rename_sym(fr, resp_old, resp_new)
+  }
+  lmod$fr <- fr
+  # The following steps are those of lme4::lmer():
+  mcout <- match.call(lme4::lmer, as.call(c(list(lme4::lmer), lmer_args)))
+  mcout$formula <- formula
+  lmod$formula <- NULL
+  devfun <- do.call(lme4::mkLmerDevfun,
+                    c(lmod, list(start = NULL, verbose = 0L, control = control)))
+  rho <- environment(devfun)
+  nobs <- nrow(lmod$fr)
+  npar <- length(rho$lower)
+  calc.derivs <- control$calc.derivs %||%
+    (nobs < control$checkConv$check.conv.nobsmax &&
+       npar < control$checkConv$check.conv.nparmax)
+  opt <- lme4::optimizeLmer(
+    devfun, optimizer = control$optimizer,
+    restart_edge = control$restart_edge, boundary.tol = control$boundary.tol,
+    control = control$optCtrl, verbose = 0L, start = NULL,
+    calc.derivs = calc.derivs,
+    force.calc.derivs = control$calc.derivs %||% FALSE,
+    use.last.params = control$use.last.params
+  )
+  # Same name as in lmer(), so that its warnings are the same:
+  checkConv <- "lme4" %:::% "checkConv"
+  cc <- checkConv(attr(opt, "derivs"), opt$par, ctrl = control$checkConv,
+                  lbound = rho$lower, ubound = rho$upper, nobs = nobs,
+                  ndim = npar)
+  return(lme4::mkMerMod(rho, opt, lmod$reTrms, fr = lmod$fr, mc = mcout,
+                        lme4conv = cc))
+}
+
+# Draw-wise divergence minimizer for divmin() that uses lmer_shared_fit() with
+# the lFormula() result of the first draw, or `NULL` if this does not apply.
+lmer_shared_callback <- function(formulas, dot_args) {
+  if (!getOption("projpred.lmer_shared", TRUE) || !lmer_shared_ok()) {
+    return(NULL)
+  }
+  data <- dot_args$data
+  resp_nms <- vapply(formulas, function(fml) {
+    if (is.name(fml[[2]])) as.character(fml[[2]]) else NA_character_
+  }, character(1))
+  if (!is.data.frame(data) || anyNA(resp_nms) ||
+      !all(resp_nms %in% names(data)) || anyNA(data[resp_nms])) {
+    return(NULL)
+  }
+  control <- dot_args$control %||% control_callback(dot_args$family)
+  lmer_dot_args <- dot_args[intersect(names(dot_args),
+                                      methods::formalArgs(lme4::lmer))]
+  lmer_dot_args$control <- NULL
+  lmod0 <- tryCatch(
+    do.call(lme4::lFormula, c(list(formula = formulas[[1]], control = control),
+                              lmer_dot_args)),
+    error = function(e) NULL
+  )
+  if (is.null(lmod0) || nrow(lmod0$fr) != nrow(data)) {
+    return(NULL)
+  }
+  force(lmod0)
+  return(function(formula, ...) {
+    lmer_args <- c(list(formula = formula, control = control), lmer_dot_args)
+    tryCatch(
+      lmer_shared_fit(lmod0, formula = formula, data = data, control = control,
+                      lmer_args = lmer_args),
+      error = function(e) fit_glmer_callback(formula = formula, ...)
+    )
+  })
+}
+
+# Whether lmer_shared_fit() gives the fits of lme4::lmer() with the installed
+# lme4 (checked once per R session on a small fixed problem, without random
+# numbers).
+lmer_shared_state <- new.env(parent = emptyenv())
+lmer_shared_ok <- function() {
+  if (is.null(lmer_shared_state$ok)) {
+    lmer_shared_state$ok <-
+      isTRUE(tryCatch(lmer_shared_check(), error = function(e) FALSE))
+  }
+  return(lmer_shared_state$ok)
+}
+lmer_shared_check <- function() {
+  n <- 60L
+  idx <- seq_len(n)
+  dat <- data.frame(x1 = sin(idx), x2 = cos(1.7 * idx),
+                    g = factor(paste0("g", idx %% 6L)),
+                    h = factor(paste0("h", idx %% 4L)))
+  u <- c(0.8, -0.5, 0.3, -0.9, 0.6, -0.2)
+  for (s in 1:3) {
+    dat[[paste0(".y.", s)]] <- dat$x1 + 0.5 * dat$x2 +
+      u[as.integer(dat$g)] * (1 + 0.3 * s) + 0.4 * sin(s * idx) +
+      0.2 * dat$x1 * u[as.integer(dat$g)]
+  }
+  wts <- 1 + 0.5 * cos(idx)
+  control <- lme4::lmerControl()
+  fmls <- lapply(1:3, function(s) {
+    as.formula(paste0(".y.", s, " ~ x1 + x2 + (1 + x1 | g) + (1 | h)"))
+  })
+  lmod0 <- lme4::lFormula(fmls[[1]], data = dat, weights = wts,
+                          control = control)
+  same <- logical(3)
+  for (s in 1:3) {
+    lmer_args <- list(formula = fmls[[s]], control = control, data = dat,
+                      weights = wts)
+    suppressMessages(suppressWarnings({
+      fit_ref <- do.call(lme4::lmer, lmer_args)
+      fit_shared <- lmer_shared_fit(lmod0, formula = fmls[[s]], data = dat,
+                                    control = control, lmer_args = lmer_args)
+    }))
+    same[s] <- isTRUE(all.equal(fit_ref, fit_shared, tolerance = 0)) &&
+      identical(lme4::getME(fit_ref, "theta"),
+                lme4::getME(fit_shared, "theta")) &&
+      identical(lmer_frame_attrs(fit_ref), lmer_frame_attrs(fit_shared))
+  }
+  return(all(same))
+}
+
+# The attributes "terms" and "formula" of the model frame of a merMod fit,
+# without their environments. all.equal() does not compare the attributes of
+# these terms (for example "varnames.fixed", which predictions for new data
+# use).
+lmer_frame_attrs <- function(fit) {
+  out <- list(terms = attr(fit@frame, "terms"),
+              formula = attr(fit@frame, "formula"))
+  lapply(out, function(x) {
+    attr(x, ".Environment") <- NULL
+    x
+  })
+}
+
+# `fit` (a submodel fit) without the data frame in element `data` of its call.
+# The fitters get the data as a value (through do.call()), so the call of a fit
+# holds a copy of the data frame, with the response columns of all draws. In
+# memory, the fits share this copy, but each serialized fit (from a parallel
+# worker, or in a saved projection) holds its own. Predictions for new data do
+# not use the call. The new element is a symbol that does not exist, so code
+# that evaluates the call (update(), lme4::getData()) stops instead of finding
+# other data. Fits that keep the data in another element (stats::glm(),
+# mclogit::mblogit()) keep it. For a MASS::glmmPQL() fit, the formula of
+# `varStruct` gets the environment of the fixed-effects formula.
+strip_call_data <- function(fit) {
+  if (isS4(fit)) {
+    if (methods::.hasSlot(fit, "call") && is.call(fit@call) &&
+        is.data.frame(fit@call[["data"]])) {
+      fit@call[["data"]] <- quote(.projpred_data_removed)
+    }
+    return(fit)
+  }
+  if (!is.list(fit) || is.data.frame(fit)) {
+    return(fit)
+  }
+  cl <- fit[["call"]]
+  if (is.call(cl) && is.data.frame(cl[["data"]])) {
+    cl[["data"]] <- quote(.projpred_data_removed)
+    fit[["call"]] <- cl
+  }
+  # MASS::glmmPQL() keeps its frame (`data`, `Call`, the start fit `fit0`,
+  # `mf`) as the environment of the formula of `varStruct`.
+  if (inherits(fit, "glmmPQL")) {
+    fml <- attr(fit$modelStruct$varStruct, "formula")
+    env <- if (inherits(fit$call$fixed, "formula")) {
+      environment(fit$call$fixed)
+    }
+    if (inherits(fml, "formula") && is.environment(env)) {
+      attr(fml, ".Environment") <- env
+      attr(fit$modelStruct$varStruct, "formula") <- fml
+    }
+  }
+  return(fit)
 }
 
 # Removes the lines of the captured messages and warnings of a submodel fit
@@ -181,12 +684,192 @@ filter_mssgs_warns <- function(mssgs_warns_capt) {
   return(mssgs_warns_capt)
 }
 
+# Finds the levels of factor-like predictors that occur only in the removed rows
+# (`!keep`). The predictors are those of the population-level part of `formula`
+# and of the left-hand sides of its group-level terms. Factor-like means a
+# factor, character or logical variable, or a numeric variable that `formula`
+# uses only inside factor(), as.factor(), ordered() or as.ordered() (not, for
+# example, also as a group-level slope). Grouping factors are left out, because
+# repair_re() treats a lost group as a new group.
+# For each variable, returns the lost levels and the reference level (the first
+# level that remains). Returns `NULL` if no level is lost.
+#
+# recode_lost_levels() sets a lost level to the reference level before the
+# prediction. The GLM fitter of divmin() keeps the rows with weight 0 and does
+# not use these functions. With treatment contrasts, it predicts a lost level
+# as follows:
+# * A level other than the reference level: its dummy column is 0 in all rows
+#   with positive weight, so glm_ridge() sets its coefficient to 0. The
+#   prediction is the one for the reference level, as above.
+# * The reference level: the prediction is the mean of the predictions for the
+#   other levels, with weights p (1 - p), where p is the weighted share of a
+#   level. For two other levels, this is their midpoint.
+# With other contrasts (for example, sum contrasts), the prediction for a lost
+# level comes from the ridge solution of glm_ridge().
+lost_levels <- function(data, keep, formula) {
+  fml_fixed <- reformulas::nobars(formula)
+  bars <- reformulas::findbars(formula)
+  grp_nms <- unlist(lapply(bars, function(bar) all.vars(bar[[3]])))
+  # The population-level part and the left-hand sides of the group-level terms
+  # (lme4::mkNewReTrms() stops for a level that the fit does not know):
+  rhs_all <- as.call(c(
+    list(as.name("+"), fml_fixed[[length(fml_fixed)]]),
+    lapply(bars, function(bar) bar[[2]])
+  ))
+  # Variables inside factor() and similar calls, and variables elsewhere:
+  fac_fns <- c("factor", "as.factor", "ordered", "as.ordered")
+  find_vars <- function(e) {
+    if (is.call(e)) {
+      fn <- sub("^.*::", "", paste(deparse(e[[1]]), collapse = ""))
+      if (fn %in% fac_fns) {
+        return(list(inside = all.vars(e), outside = character()))
+      }
+      res <- lapply(as.list(e)[-1], find_vars)
+      return(list(inside = unlist(lapply(res, "[[", "inside")),
+                  outside = unlist(lapply(res, "[[", "outside"))))
+    }
+    if (is.name(e)) {
+      return(list(inside = character(), outside = as.character(e)))
+    }
+    return(list(inside = character(), outside = character()))
+  }
+  vars_rhs <- find_vars(rhs_all)
+  fac_only <- setdiff(vars_rhs$inside, vars_rhs$outside)
+  x_nms <- setdiff(intersect(all.vars(rhs_all), names(data)), grp_nms)
+  out <- lapply(setNames(nm = x_nms), function(x_nm) {
+    x <- data[[x_nm]]
+    if (!(is.factor(x) || is.character(x) || is.logical(x) ||
+          (is.numeric(x) && x_nm %in% fac_only))) {
+      return(NULL)
+    }
+    x_keep <- x[keep]
+    vals_keep <- unique(x_keep[!is.na(x_keep)])
+    vals_rm <- unique(x[!keep & !is.na(x)])
+    if (is.factor(x)) {
+      vals_keep <- as.character(vals_keep)
+      vals_rm <- as.character(vals_rm)
+    }
+    lost <- setdiff(vals_rm, vals_keep)
+    if (!length(lost) || !length(vals_keep)) {
+      return(NULL)
+    }
+    if (is.factor(x)) {
+      ref <- levels(droplevels(x_keep))[1]
+    } else {
+      ref <- sort(vals_keep)[1]
+    }
+    list(lost = lost, ref = ref)
+  })
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) {
+    return(NULL)
+  }
+  return(out)
+}
+
+# Sets the levels that lost_levels() recorded (attribute `projpred_lost_lvls` of
+# the fits) to the reference level in `newdata`.
+recode_lost_levels <- function(newdata, lost_lvls) {
+  if (is.null(lost_lvls) || !is.data.frame(newdata)) {
+    return(newdata)
+  }
+  for (x_nm in intersect(names(lost_lvls), names(newdata))) {
+    x <- newdata[[x_nm]]
+    lost <- lost_lvls[[x_nm]]$lost
+    ref <- lost_lvls[[x_nm]]$ref
+    if (is.factor(x)) {
+      # Drop the lost levels, because the predict() method of
+      # mclogit::mblogit() uses all levels of `newdata`:
+      lvls <- union(setdiff(levels(x), lost), ref)
+      x_chr <- as.character(x)
+      x_chr[x_chr %in% lost] <- ref
+      x <- factor(x_chr, levels = lvls, ordered = is.ordered(x))
+    } else if (typeof(x) == typeof(ref) ||
+               (is.numeric(x) && is.numeric(ref))) {
+      x[x %in% lost] <- ref
+    }
+    newdata[[x_nm]] <- x
+  }
+  return(newdata)
+}
+
+# Drops the levels that lost_levels() recorded from the factors in `data` (the
+# data without the removed rows), so that fitters which keep unused levels in
+# the model matrix do not get a column of zeros. factor() removes the
+# `contrasts` attribute, so the fit uses the default contrasts for such a
+# factor. A contrast matrix cannot in general be reduced to fewer levels. The
+# population-level predictions of these (multilevel, additive and
+# augmented-data) fitters do not depend on the contrasts; the group-level
+# predictions do not depend on them for an unstructured covariance matrix.
+drop_lost_levels <- function(data, lost_lvls) {
+  for (x_nm in intersect(names(lost_lvls), names(data))) {
+    x <- data[[x_nm]]
+    if (is.factor(x)) {
+      data[[x_nm]] <- factor(x, levels = setdiff(levels(x),
+                                                 lost_lvls[[x_nm]]$lost),
+                             ordered = is.ordered(x))
+    }
+  }
+  return(data)
+}
+
 # Use projpred's own implementation to fit non-multilevel non-additive
 # submodels:
 fit_glm_ridge_callback <- function(formula, data,
                                    projpred_var = matrix(nrow = nrow(data)),
-                                   regul = 1e-4, thresh_conv = 1e-7, ...) {
+                                   regul = 1e-4, thresh_conv = 1e-7,
+                                   projpred_shared_x = NULL, ...) {
   # Preparations:
+  if (!is.null(projpred_shared_x)) {
+    # Model matrix built once by shared_model_matrix(); only the response
+    # differs between the draws:
+    x <- projpred_shared_x$x
+    xlvls <- projpred_shared_x$xlvls
+    ctrs <- projpred_shared_x$contrasts
+    # These terms come from the first draw-wise formula. The predictions for
+    # new data use only their predictor variables:
+    terms_train <- projpred_shared_x$terms
+    y <- data[[all.vars(formula[[2]])]]
+    names(y) <- projpred_shared_x$y_names
+  } else {
+    xy <- glm_model_matrix(formula, data = data)
+    x <- xy$x
+    xlvls <- xy$xlvls
+    ctrs <- xy$contrasts
+    terms_train <- xy$terms
+    y <- xy$y
+  }
+  # Exclude arguments from `...` which cannot be passed to glm_ridge():
+  dot_args <- list(...)
+  dot_args <- dot_args[setdiff(
+    intersect(names(dot_args), methods::formalArgs(glm_ridge)),
+    "print_msgs"
+  )]
+  # Call the submodel fitter (it returns its warning messages instead of
+  # printing them):
+  fit <- do.call(glm_ridge, c(
+    list(x = x, y = y, obsvar = projpred_var, lambda = regul,
+         thresh = thresh_conv, print_msgs = FALSE),
+    dot_args
+  ))
+  out_capt <- unique(grep("[Ww]arning|bug", fit$msgs, value = TRUE))
+  if (length(out_capt) > 0) {
+    warning(paste(out_capt, collapse = "\n"))
+  }
+  # Post-processing:
+  rownames(fit$beta) <- colnames(x)
+  # `terms` keeps the data-dependent bases of the training data (attribute
+  # "predvars"), for predictions for new data:
+  sub <- nlist(alpha = fit$beta0, beta = fit$beta, w = fit$w, formula, x, y,
+               xlvls, terms = terms_train, contrasts = ctrs)
+  class(sub) <- "subfit"
+  return(sub)
+}
+
+# Model frame preparations for fit_glm_ridge_callback(): predictor model matrix
+# (without intercept column), levels of character and factor predictors, and
+# response.
+glm_model_matrix <- function(formula, data) {
   fr <- model.frame(formula, data = data, drop.unused.levels = TRUE)
   da_classes <- attr(attr(fr, "terms"), "dataClasses")
   nms_chr_fac <- names(da_classes)[da_classes %in% c("character", "factor")]
@@ -199,38 +882,355 @@ fit_glm_ridge_callback <- function(formula, data,
   } else {
     xlvls <- NULL
   }
-  # TODO: In the following model.matrix() call, allow user-specified contrasts
-  # to be passed to argument `contrasts.arg`. The `contrasts.arg` default
-  # (`NULL`) uses `options("contrasts")` internally, but it might be more
-  # convenient to let users specify contrasts directly. At that occasion,
-  # contrasts should also be tested thoroughly (not done until now).
+  # The model frame keeps the `contrasts` attributes of `data` (see
+  # set_contrasts()), and model.matrix() uses them:
   x <- model.matrix(formula, data = fr)
+  ctrs <- attr(x, "contrasts")
   x <- x[, colnames(x) != "(Intercept)", drop = FALSE]
-  y <- model.response(fr)
-  # Exclude arguments from `...` which cannot be passed to glm_ridge():
-  dot_args <- list(...)
-  dot_args <- dot_args[intersect(
-    names(dot_args),
-    methods::formalArgs(glm_ridge)
-  )]
-  # Call the submodel fitter:
-  out_capt <- utils::capture.output(
-    fit <- do.call(glm_ridge, c(
-      list(x = x, y = y, obsvar = projpred_var, lambda = regul,
-           thresh = thresh_conv),
-      dot_args
-    ))
-  )
-  out_capt <- unique(grep("[Ww]arning|bug", out_capt, value = TRUE))
-  if (length(out_capt) > 0) {
-    warning(paste(out_capt, collapse = "\n"))
+  return(list(x = x, xlvls = xlvls, y = model.response(fr), n_fr = nrow(fr),
+              terms = attr(fr, "terms"), contrasts = ctrs))
+}
+
+# Model matrix shared by the draw-wise formulas `formulas` (which have to differ
+# only in the response). Returns `NULL` if sharing is not possible: different
+# right-hand sides, a response that is not a plain column of `data`, or missing
+# values (which would make the model frames differ between the draws).
+shared_model_matrix <- function(formulas, data) {
+  if (!is.data.frame(data)) {
+    return(NULL)
   }
-  # Post-processing:
-  rownames(fit$beta) <- colnames(x)
-  sub <- nlist(alpha = fit$beta0, beta = fit$beta, w = fit$w, formula, x, y,
-               xlvls)
-  class(sub) <- "subfit"
-  return(sub)
+  rhs_1 <- formulas[[1]][[3]]
+  if (!all(vapply(formulas, function(fml) {
+    length(fml) == 3 && identical(fml[[3]], rhs_1)
+  }, logical(1)))) {
+    return(NULL)
+  }
+  resp_nms <- vapply(formulas, function(fml) {
+    if (is.name(fml[[2]])) as.character(fml[[2]]) else NA_character_
+  }, character(1))
+  if (anyNA(resp_nms) || !all(resp_nms %in% names(data)) ||
+      anyNA(data[resp_nms])) {
+    return(NULL)
+  }
+  xy <- glm_model_matrix(formulas[[1]], data = data)
+  if (xy$n_fr != nrow(data)) {
+    return(NULL)
+  }
+  # The response names (as from model.response()) are also shared, so the
+  # draw-wise responses do not each get their own copy:
+  return(list(x = xy$x, xlvls = xy$xlvls, y_names = names(xy$y),
+              terms = xy$terms, contrasts = xy$contrasts))
+}
+
+# The model frame and the model matrix of all main-effect terms of `formula` for
+# the data `data` (with the contrasts of the reference model set, see
+# set_contrasts()), for shared_x_from_design(). Returns `NULL` if the column
+# blocks would not give the model matrix of shared_model_matrix(): rows with
+# missing values, column names that data.frame() changes (see
+# subset_formula_and_data()), variables of the model frame other than the term
+# labels (for example an offset), or an error of model.frame() or
+# model.matrix().
+design_main_effects <- function(formula, data) {
+  if (!is.data.frame(data) || nrow(data) == 0 ||
+      !identical(make.names(names(data), unique = TRUE), names(data)) ||
+      any(startsWith(names(data), "."))) {
+    return(NULL)
+  }
+  lbls <- extract_terms_response(formula)$individual_terms
+  if (length(lbls) == 0) {
+    return(NULL)
+  }
+  fml <- stats::reformulate(lbls, env = environment(formula))
+  fr <- tryCatch(model.frame(fml, data = data, drop.unused.levels = TRUE),
+                 error = function(e) NULL)
+  if (is.null(fr) || nrow(fr) != nrow(data)) {
+    return(NULL)
+  }
+  dcl <- attr(attr(fr, "terms"), "dataClasses")
+  pv <- as.list(attr(attr(fr, "terms"), "predvars"))[-1]
+  if (!identical(names(dcl), lbls) || length(pv) != length(lbls)) {
+    return(NULL)
+  }
+  # model.matrix() can fail for a term that no submodel uses (for example a
+  # factor with one level):
+  mm <- tryCatch(model.matrix(fml, data = fr), error = function(e) NULL)
+  if (is.null(mm)) {
+    return(NULL)
+  }
+  keep <- colnames(mm) != "(Intercept)"
+  asg <- attr(mm, "assign")[keep]
+  nms_chr_fac <- lbls[dcl %in% c("character", "factor")]
+  return(list(
+    labels = lbls,
+    x = mm[, keep, drop = FALSE],
+    cols = lapply(seq_along(lbls), function(j) which(asg == j)),
+    predvars = pv,
+    classes = dcl,
+    lvls = lapply(setNames(nm = nms_chr_fac), function(nm) {
+      levels(as.factor(fr[[nm]]))
+    }),
+    contrasts = attr(mm, "contrasts")
+  ))
+}
+
+# The output of shared_model_matrix() for the draw-wise formulas `formulas`
+# (see validate_response_formula()), from the column blocks of `design` (see
+# design_main_effects()), without a model frame and a model matrix for the
+# submodel. Without interactions, the columns of a term do not depend on the
+# other terms. `y_names` are the names of the response (as from
+# model.response()). Returns `NULL` for an interaction, a model without
+# intercept, an offset, or a term that `design` does not have.
+shared_x_from_design <- function(formulas, design, y_names) {
+  tt <- terms(formulas[[1]])
+  lbls <- attr(tt, "term.labels")
+  vars <- as.list(attr(tt, "variables"))[-1]
+  if (attr(tt, "intercept") != 1 || attr(tt, "response") != 1 ||
+      !is.null(attr(tt, "offset")) || any(attr(tt, "order") != 1) ||
+      length(vars) != length(lbls) + 1L || !is.name(vars[[1]])) {
+    return(NULL)
+  }
+  idx <- match(lbls, design$labels)
+  if (anyNA(idx)) {
+    return(NULL)
+  }
+  # The attributes that model.frame() adds to the terms (the response is a
+  # numeric column of the data):
+  attr(tt, "predvars") <- as.call(c(list(quote(list), vars[[1]]),
+                                    design$predvars[idx]))
+  dcl <- c(setNames("numeric", as.character(vars[[1]])), design$classes[idx])
+  attr(tt, "dataClasses") <- dcl
+  x <- design$x[, as.integer(unlist(design$cols[idx])), drop = FALSE]
+  nms_chr_fac <- names(dcl)[dcl %in% c("character", "factor")]
+  xlvls <- if (length(nms_chr_fac) > 0) design$lvls[nms_chr_fac]
+  nms_ctr <- intersect(names(dcl), names(design$contrasts))
+  ctrs <- if (length(nms_ctr) > 0) design$contrasts[nms_ctr]
+  return(list(x = x, xlvls = xlvls, y_names = y_names, terms = tt,
+              contrasts = ctrs))
+}
+
+# fit_glm_ridge_callback() with a fixed shared model matrix. The enclosing
+# environment holds only `shared_x` (relevant for the parallel case in divmin(),
+# where the function is exported).
+glm_ridge_callback_shared <- function(shared_x) {
+  force(shared_x)
+  function(...) {
+    fit_glm_ridge_callback(..., projpred_shared_x = shared_x)
+  }
+}
+
+# The multi-draw fitters of divmin() for draw-wise formulas `formulas` with the
+# shared model matrix `shared_x`: glm_ridge_gauss_multi() and
+# glm_ridge_native_multi(). `y` (optional) is the matrix of the draw-wise
+# responses (otherwise taken from `dot_args$data`). Returns `NULL` if neither
+# fitter covers the case.
+divmin_multi <- function(formulas, shared_x, dot_args, throw_warn_sdivmin,
+                         do_check_conv, y = NULL) {
+  # Gaussian submodels with the identity link: one solve for all draws (this
+  # fitter cannot throw messages or warnings in this case):
+  outdmin <- glm_ridge_gauss_multi(formulas, shared_x = shared_x,
+                                   dot_args = dot_args, y = y)
+  if (!is.null(outdmin)) {
+    return(outdmin)
+  }
+  # Families with native pseudo-observations: all draws in one C++ call:
+  outdmin <- glm_ridge_native_multi(formulas, shared_x = shared_x,
+                                    dot_args = dot_args, y = y)
+  if (!is.null(outdmin)) {
+    mssgs_warns_capts <- attr(outdmin, "mssgs_warns_capts")
+    attr(outdmin, "mssgs_warns_capts") <- NULL
+    warn_prj_drawwise(mssgs_warns_capts, throw_warn = throw_warn_sdivmin)
+    # check_conv_s() is `TRUE` for `subfit` objects, so check_conv() has an
+    # effect only if a draw has messages:
+    if (any(lengths(mssgs_warns_capts) > 0)) {
+      check_conv(outdmin, lengths(mssgs_warns_capts), do_check = do_check_conv)
+    }
+    return(outdmin)
+  }
+  return(NULL)
+}
+
+# The parts of divmin() that depend only on the submodel formula `formula` and
+# on the predictor data (not on the values of the draw-wise responses in
+# `data`): the draw-wise formulas and the shared model matrix. Returns `NULL`
+# if divmin() would not use the multi-draw fitters (see divmin_multi()) for
+# this formula.
+divmin_prepare <- function(formula, data) {
+  trms_all <- extract_terms_response(formula)
+  if (length(trms_all$group_terms) > 0 ||
+      length(trms_all$additive_terms) > 0) {
+    return(NULL)
+  }
+  formulas <- validate_response_formula(formula)
+  if (length(formulas) < 1) {
+    return(NULL)
+  }
+  shared_x <- shared_model_matrix(formulas, data = data)
+  if (is.null(shared_x)) {
+    return(NULL)
+  }
+  return(nlist(formulas, shared_x))
+}
+
+# Fits all draw-wise submodels of fit_glm_ridge_callback() at once, for a
+# Gaussian submodel with the identity link. For this family, glm_ridge() solves
+# one weighted ridge least-squares problem in one exact step. The draws share
+# the model matrix, the observation weights, the standardization and the
+# penalty. Thus, one factorization with one right-hand side per draw gives the
+# same solutions. Returns `NULL` if one of the checks below fails; then divmin()
+# uses the draw-wise path.
+glm_ridge_gauss_multi <- function(formulas, shared_x, dot_args, y = NULL) {
+  family <- dot_args$family
+  if (is.null(family) || family$family != "gaussian" ||
+      family$link != "identity") {
+    return(NULL)
+  }
+  # fit_glm_ridge_callback() passes only the formal arguments of glm_ridge() on
+  # and ignores the others. Of these, this function uses only `family`,
+  # `weights` and `thresh` (not used for this family):
+  args_glm_ridge <- intersect(names(dot_args), methods::formalArgs(glm_ridge))
+  if (!all(args_glm_ridge %in% c("family", "weights", "thresh"))) {
+    return(NULL)
+  }
+  x <- shared_x$x
+  if (ncol(x) == 0) {
+    return(NULL)
+  }
+  data <- dot_args$data
+  weights <- dot_args$weights %||% rep(1.0, nrow(x))
+  regul <- dot_args$regul %||% 1e-4
+  if (length(weights) != nrow(x) || anyNA(weights)) {
+    return(NULL)
+  }
+  if (is.null(y)) {
+    resp_nms <- vapply(formulas, function(fml) as.character(fml[[2]]),
+                       character(1))
+    y <- as.matrix(data[resp_nms])
+  }
+  # As in glm_ridge():
+  transf <- standardization(x, center = TRUE, scale = TRUE, weights = weights)
+  if (any(transf$scale == 0)) {
+    return(NULL)
+  }
+  x_std <- cbind(1, t((t(x) - transf$shift) / transf$scale))
+  sqrt_w <- sqrt(weights)
+  x_w <- x_std * sqrt_w
+  regmat <- diag(c(0, rep(regul, ncol(x))), nrow = ncol(x_std))
+  # A singular system (for example, `regul = 0` with collinear columns) or
+  # non-finite coefficients (for example, from infinite responses) go to the
+  # draw-wise path:
+  coefs <- tryCatch(
+    solve(crossprod(x_w) + regmat, crossprod(x_w, y * sqrt_w)),
+    error = function(e) NULL
+  )
+  if (is.null(coefs) || !all(is.finite(coefs))) {
+    return(NULL)
+  }
+  beta <- coefs[-1, , drop = FALSE] / transf$scale
+  beta0 <- coefs[1, ] - colSums(transf$shift * beta)
+  # As from glm_ridge_c() (double, also for integer observation weights):
+  w <- matrix(as.numeric(weights), ncol = 1)
+  return(lapply(seq_along(formulas), function(s) {
+    beta_s <- beta[, s, drop = FALSE]
+    dimnames(beta_s) <- list(colnames(x), NULL)
+    y_s <- y[, s]
+    names(y_s) <- shared_x$y_names
+    # `shared_x$terms` comes from the first formula. Its response differs from
+    # draw s, but the predictions for new data use only its predictor
+    # variables.
+    structure(list(alpha = unname(beta0[s]), beta = beta_s, w = w,
+                   formula = formulas[[s]], x = x, y = y_s,
+                   xlvls = shared_x$xlvls, terms = shared_x$terms,
+                   contrasts = shared_x$contrasts),
+              class = "subfit")
+  }))
+}
+
+# Fits all draw-wise submodels of fit_glm_ridge_callback() in one C++ call, for
+# the families and links with native pseudo-observations (see
+# native_pseudo_codes()). The draws share the model matrix, the observation
+# weights, the standardization and the penalty, so this sets up glm_ridge()
+# once. Each draw gets the IRLS iterations of glm_ridge() and the same result.
+# Attribute `mssgs_warns_capts` holds the messages of each draw, as divmin()
+# collects them from fit_glm_ridge_callback(). Returns `NULL` for other cases;
+# divmin() then fits the draws one by one.
+glm_ridge_native_multi <- function(formulas, shared_x, dot_args, y = NULL) {
+  family <- dot_args$family
+  if (is.null(family)) {
+    return(NULL)
+  }
+  family <- extend_family(family)
+  codes <- native_pseudo_codes(family)
+  if (is.null(codes)) {
+    return(NULL)
+  }
+  # fit_glm_ridge_callback() passes only the formal arguments of glm_ridge() on.
+  # Of these, the following are reproduced here:
+  args_glm_ridge <- intersect(names(dot_args), methods::formalArgs(glm_ridge))
+  if (!all(args_glm_ridge %in% c("family", "weights", "qa_updates_max",
+                                 "ls_iter_max"))) {
+    return(NULL)
+  }
+  x <- shared_x$x
+  if (ncol(x) == 0) {
+    return(NULL)
+  }
+  data <- dot_args$data
+  weights <- dot_args$weights %||% rep(1.0, nrow(x))
+  if (length(weights) != nrow(x) || anyNA(weights)) {
+    return(NULL)
+  }
+  regul <- dot_args$regul %||% 1e-4
+  thresh <- dot_args$thresh_conv %||% 1e-7
+  # As in glm_ridge():
+  if (family$family == "gaussian" && family$link == "identity") {
+    qa_updates_max <- 1
+    ls_iter_max <- 1
+    thresh <- 0
+  } else {
+    qa_updates_max <- dot_args$qa_updates_max %||% 100
+    ls_iter_max <- dot_args$ls_iter_max %||% 30
+  }
+  if (is.null(y)) {
+    resp_nms <- vapply(formulas, function(fml) as.character(fml[[2]]),
+                       character(1))
+    y <- as.matrix(data[resp_nms])
+  }
+  transf <- standardization(x, center = TRUE, scale = TRUE, weights = weights)
+  penalty <- rep(1.0, ncol(x))
+  penalty[transf$scale == 0] <- Inf
+  transf$scale[transf$scale == 0] <- 1
+  x_std <- t((t(x) - transf$shift) / transf$scale)
+  out <- glm_ridge_native_multi_c(
+    x_std, y, as.numeric(weights), rep(0.0, nrow(x)), codes[1], codes[2],
+    regul, TRUE, penalty, rep(0, ncol(x) + 1), weights, thresh,
+    qa_updates_max, ls_iter_max
+  )
+  beta <- out$beta / transf$scale
+  beta0 <- as.vector(out$beta0) - colSums(transf$shift * beta)
+  outdmin <- lapply(seq_along(formulas), function(s) {
+    beta_s <- beta[, s, drop = FALSE]
+    dimnames(beta_s) <- list(colnames(x), NULL)
+    y_s <- y[, s]
+    names(y_s) <- shared_x$y_names
+    # As in glm_ridge_gauss_multi():
+    structure(list(alpha = beta0[s], beta = beta_s,
+                   w = out$w[, s, drop = FALSE], formula = formulas[[s]],
+                   x = x, y = y_s, xlvls = shared_x$xlvls,
+                   terms = shared_x$terms, contrasts = shared_x$contrasts),
+              class = "subfit")
+  })
+  # As fit_glm_ridge_callback() turns the messages into one warning and
+  # capt_conds() splits it into lines:
+  if (all(lengths(out$msgs) == 0)) {
+    mssgs_warns_capts <- rep(list(character()), length(formulas))
+  } else {
+    mssgs_warns_capts <- lapply(out$msgs, function(msgs_s) {
+      msgs_s <- unique(grep("[Ww]arning|bug", msgs_s, value = TRUE))
+      setdiff(as.character(unlist(strsplit(msgs_s, "\n", fixed = TRUE))), "")
+    })
+  }
+  attr(outdmin, "mssgs_warns_capts") <- mssgs_warns_capts
+  return(outdmin)
 }
 
 # Alternative to fit_glm_ridge_callback() (may be used via global option
@@ -266,11 +1266,8 @@ fit_glm_callback <- function(formula, family, ...) {
 fit_gam_callback <- function(formula, ...) {
   # Exclude arguments from `...` which cannot be passed to mgcv::gam():
   dot_args <- list(...)
-  dot_args <- dot_args[intersect(
-    names(dot_args),
-    c(methods::formalArgs(mgcv::gam),
-      methods::formalArgs(mgcv::gam.fit))
-  )]
+  dot_args <- dot_args[intersect(names(dot_args),
+                                 methods::formalArgs(mgcv::gam))]
   # Call the submodel fitter:
   return(do.call(mgcv::gam, c(list(formula = formula), dot_args)))
 }
@@ -287,13 +1284,20 @@ fit_gamm_callback <- function(formula, projpred_formula_no_random,
       methods::formalArgs(lme4::lFormula),
       methods::formalArgs(lme4::glFormula))
   )]
+  # As in fit_glmer_callback(). The error handler below reads `family` and
+  # `control`, so the changed family and control are copies. `data` is changed
+  # in place; glmer_data() does not change it again in a refit:
+  family_gamm <- glmer_family(family)
+  control_gamm <- glmer_control(control, family = family_gamm)
+  data <- glmer_data(data, formula = projpred_formula_no_random,
+                     family = family_gamm)
   # Call the submodel fitter:
   fit <- tryCatch({
-    do.call(gamm4::gamm4, c(
+    gamm_check_conv(do.call(gamm4::gamm4, c(
       list(formula = projpred_formula_no_random, random = projpred_random,
-           data = data, family = family, control = control),
+           data = data, family = family_gamm, control = control_gamm),
       dot_args
-    ))
+    )), control = control_gamm)
   }, error = function(e) {
     if (grepl("not positive definite", as.character(e))) {
       if ("optimx" %in% control$optimizer &&
@@ -309,17 +1313,19 @@ fit_gamm_callback <- function(formula, projpred_formula_no_random,
              "optimizer, but cannot find the optimx package. Please install ",
              "it to be able to try this fix.")
       }
-      return(fit_gamm_callback(
-        formula = formula,
-        projpred_formula_no_random = projpred_formula_no_random,
-        projpred_random = projpred_random,
-        data = data,
-        family = family,
-        control = control_callback(family,
-                                   optimizer = "optimx",
-                                   optCtrl = list(method = "nlminb")),
-        ...
-      ))
+      return(refit_optimx(function() {
+        fit_gamm_callback(
+          formula = formula,
+          projpred_formula_no_random = projpred_formula_no_random,
+          projpred_random = projpred_random,
+          data = data,
+          family = family,
+          control = control_callback(family,
+                                     optimizer = "optimx",
+                                     optCtrl = list(method = "nlminb")),
+          ...
+        )
+      }, e_first = e, pkg = "gamm4"))
     } else if (grepl("pwrssUpdate", as.character(e))) {
       # lme4's PIRLS could not reduce the deviance any further, so relax the
       # convergence tolerance for the PIRLS step by a factor of 10 and retry
@@ -348,14 +1354,99 @@ fit_gamm_callback <- function(formula, projpred_formula_no_random,
 
   fit$random <- projpred_random
   fit$formula <- projpred_formula_no_random
+  # Contrasts of the factors in the group-level terms, for repair_re.gamm4():
+  fit$re_contrasts <- re_contrasts(data, projpred_random)
+  fit <- gamm4_small_envs(fit)
   class(fit) <- c("gamm4")
   return(fit)
+}
+
+# `fit` (a gamm4::gamm4() fit) with the environment of `fit$gam$formula` (the
+# environment of the formula of the reference model) for its prediction
+# formula and for the terms and formulas of its model frames. gamm4() gives
+# these objects its own function frame, which holds the data, so each
+# serialized fit holds a copy of the data. Predictions for new data use only
+# the variables of the new data and functions that the new environment also
+# finds.
+gamm4_small_envs <- function(fit) {
+  env <- environment(fit$gam$formula)
+  if (!is.environment(env)) {
+    return(fit)
+  }
+  set_env <- function(x) {
+    if (!is.null(x)) {
+      attr(x, ".Environment") <- env
+    }
+    return(x)
+  }
+  pf <- fit$gam$pred.formula
+  if (inherits(pf, "formula")) {
+    if (!is.null(attr(pf, "full"))) {
+      attr(pf, "full") <- set_env(attr(pf, "full"))
+    }
+    fit$gam$pred.formula <- set_env(pf)
+  }
+  if (is.data.frame(fit$gam$model)) {
+    attr(fit$gam$model, "terms") <- set_env(attr(fit$gam$model, "terms"))
+  }
+  if (isS4(fit$mer) && methods::.hasSlot(fit$mer, "frame")) {
+    fr <- fit$mer@frame
+    for (anm in c("terms", "formula")) {
+      attr(fr, anm) <- set_env(attr(fr, anm))
+    }
+    fit$mer@frame <- fr
+  }
+  return(fit)
+}
+
+# Calls `refit()`, the refit with optimx and `nlminb` after the `not positive
+# definite` error `e_first` of lme4. If this refit fails with an error that is
+# not a "cannot fix this automatically" error, stop with a message that
+# contains both error messages. (If `nlminb` fails, optimx returns `NA`
+# parameters, and lme4 then stops with "missing value where TRUE/FALSE
+# needed".) `pkg` is the package of the tuning parameters in the message.
+refit_optimx <- function(refit, e_first, pkg) {
+  tryCatch(refit(), error = function(e) {
+    if (grepl("cannot fix this automatically", conditionMessage(e))) {
+      stop(e)
+    }
+    msg_first <- trimws(conditionMessage(e_first))
+    if (!grepl("\\.$", msg_first)) msg_first <- paste0(msg_first, ".")
+    stop("Encountering the `not positive definite` error while running the ",
+         "lme4 fitting procedure, but cannot fix this automatically: the ",
+         "refit with optimx and `nlminb` failed, too. You will probably have ",
+         "to tweak ", pkg, " tuning parameters manually (via `...`). The lme4 ",
+         "error was: ", msg_first, " The error of the refit was: ",
+         conditionMessage(e))
+  })
 }
 
 # Use package "lme4" to fit multilevel submodels:
 fit_glmer_callback <- function(formula, projpred_formula_no_random,
                                projpred_random, family,
-                               control = control_callback(family), ...) {
+                               control = control_callback(family),
+                               mlvl_laplace = getOption("projpred.mlvl_laplace",
+                                                        TRUE),
+                               ...) {
+  # Binomial (logit) and Poisson (log) submodels with random intercepts only:
+  # projpred's own Laplace fit, with lme4::glmer() as the fallback if it does
+  # not converge (the fallback fit is converted to the same class):
+  if (missing(control) &&
+      mlvl_laplace_use(formula, family, list(...), use = mlvl_laplace)) {
+    ml_args <- list(...)
+    fit <- mlvl_laplace(formula, data = ml_args$data, family = family,
+                        weights = ml_args$weights)
+    if (!is.null(fit)) {
+      if (fit$convergence == 0) return(fit)
+      fit_glmer <- fit_glmer_callback(
+        formula = formula,
+        projpred_formula_no_random = projpred_formula_no_random,
+        projpred_random = projpred_random, family = family, control = control,
+        ...
+      )
+      return(mlvl_from_merMod(fit_glmer, formula, failed = fit))
+    }
+  }
   tryCatch({
     if (getOption("projpred.PQL", FALSE)) {
       # Exclude arguments from `...` which cannot be passed to MASS::glmmPQL():
@@ -371,8 +1462,12 @@ fit_glmer_callback <- function(formula, projpred_formula_no_random,
       }
       # Strip parentheses from group-level terms:
       random_trms <- labels(terms(projpred_random))
+      # The formulas below get the environment of the fixed-effects formula.
+      # MASS::glmmPQL() keeps them in its call. A formula made here without
+      # `env` keeps the frame of this function, which holds the data:
+      fml_env <- environment(projpred_formula_no_random)
       random_fmls <- lapply(random_trms, function(random_trm) {
-        as.formula(paste("~", random_trm))
+        as.formula(paste("~", random_trm), env = fml_env)
       })
       if (length(random_fmls) == 1) {
         random_fmls <- random_fmls[[1]]
@@ -397,7 +1492,8 @@ fit_glmer_callback <- function(formula, projpred_formula_no_random,
         ###
         list_pdIdent <- lapply(random_trms, function(random_trm) {
           return(nlme::pdIdent(as.formula(
-            paste("~", sub("^.*\\|[[:blank:]]*", "", random_trm), "- 1")
+            paste("~", sub("^.*\\|[[:blank:]]*", "", random_trm), "- 1"),
+            env = fml_env
           )))
         })
         idxs_multi_trms <- which(lengths(random_trms_nogrp) > 0)
@@ -411,7 +1507,7 @@ fit_glmer_callback <- function(formula, projpred_formula_no_random,
             random_IAs <- paste0(random_trms_nogrp[[idx_multi_trms]], ":",
                                  random_grp)
             return(lapply(random_IAs, function(random_IA) {
-              nlme::pdIdent(as.formula(paste("~", random_IA)))
+              nlme::pdIdent(as.formula(paste("~", random_IA), env = fml_env))
             }))
           })
           list_pdIdent_add <- unlist(list_pdIdent_add, recursive = FALSE)
@@ -447,9 +1543,16 @@ fit_glmer_callback <- function(formula, projpred_formula_no_random,
         names(dot_args),
         methods::formalArgs(lme4::glmer)
       )]
+      # For the binomial and the Poisson family, glmer_family() gives a family
+      # that lme4 evaluates without rounding:
+      family_glmer <- glmer_family(family)
+      control_glmer <- glmer_control(control, family = family_glmer)
+      dot_args$data <- glmer_data(dot_args$data, formula = formula,
+                                  family = family_glmer)
       # Call the submodel fitter:
-      return(do.call(lme4::glmer, c(list(formula = formula, family = family,
-                                         control = control),
+      return(do.call(lme4::glmer, c(list(formula = formula,
+                                         family = family_glmer,
+                                         control = control_glmer),
                                     dot_args)))
     }
   }, error = function(e) {
@@ -477,37 +1580,48 @@ fit_glmer_callback <- function(formula, projpred_formula_no_random,
              "optimizer, but cannot find the optimx package. Please install ",
              "it to be able to try this fix.")
       }
-      return(fit_glmer_callback(
-        formula = formula,
-        projpred_formula_no_random = projpred_formula_no_random,
-        projpred_random = projpred_random,
-        family = family,
-        control = control_callback(family,
-                                   optimizer = "optimx",
-                                   optCtrl = list(method = "nlminb")),
-        ...
-      ))
+      return(refit_optimx(function() {
+        fit_glmer_callback(
+          formula = formula,
+          projpred_formula_no_random = projpred_formula_no_random,
+          projpred_random = projpred_random,
+          family = family,
+          control = control_callback(family,
+                                     optimizer = "optimx",
+                                     optCtrl = list(method = "nlminb")),
+          ...
+        )
+      }, e_first = e, pkg = "lme4"))
     } else if (grepl("PIRLS", as.character(e))) {
-      if (length(dot_args$nAGQ) > 0) {
-        nAGQ_new <- dot_args$nAGQ + 1L
+      dot_args_retry <- list(...)
+      # lme4 accepts `nAGQ > 1` only for a single scalar group-level term:
+      if (!glmer_scalar_re(formula, data = dot_args_retry$data)) {
+        stop("Encountering a PIRLS error while running the lme4 fitting ",
+             "procedure, but cannot fix this automatically: a larger `nAGQ` ",
+             "requires a single scalar group-level term. You will probably ",
+             "have to tweak lme4 tuning parameters manually (via `...`). ",
+             "The lme4 error was: ", conditionMessage(e))
+      }
+      if (length(dot_args_retry$nAGQ) > 0) {
+        nAGQ_new <- dot_args_retry$nAGQ + 1L
       } else {
         nAGQ_new <- 20L
       }
+      dot_args_retry$nAGQ <- nAGQ_new
       if (nAGQ_new > 30L) {
         stop("Encountering a PIRLS error while running the lme4 fitting ",
              "procedure, but cannot fix this automatically anymore. You will ",
              "probably have to tweak lme4 tuning parameters manually (via ",
              "`...`).")
       }
-      return(fit_glmer_callback(
-        formula = formula,
-        projpred_formula_no_random = projpred_formula_no_random,
-        projpred_random = projpred_random,
-        family = family,
-        control = control,
-        nAGQ = nAGQ_new,
-        ...
-      ))
+      return(do.call(fit_glmer_callback, c(
+        list(formula = formula,
+             projpred_formula_no_random = projpred_formula_no_random,
+             projpred_random = projpred_random,
+             family = family,
+             control = control),
+        dot_args_retry
+      )))
     } else if (grepl("pwrssUpdate did not converge in \\(maxit\\) iterations",
                      as.character(e))) {
       tolPwrss_new <- 10 * control$tolPwrss
@@ -606,6 +1720,170 @@ fit_glmer_callback <- function(formula, projpred_formula_no_random,
   })
 }
 
+# Whether glmer_family() renames the binomial and the Poisson family. lme4 <
+# 2.1-1 evaluates the log density of these two family names in C++: it rounds
+# non-integer binomial responses and weights, and its Poisson objective is
+# infinite for non-integer responses (then the group-level parameters stay at
+# their start values). lme4 2.0-x estimates a dispersion parameter (sigma())
+# for a family with another name. The fit does not use it, and VarCorr() of a
+# GLMM does not use it either. gamm4::gamm4() uses it as the scale of `sp`,
+# `sig2` and `Vp` of the `gam` part (not of the coefficients); projpred does
+# not use these. (lme4 < 2.0-1 scales VarCorr() by sigma(); projpred requires
+# lme4 >= 2.0-1.)
+lme4_needs_glmer_family <- function() {
+  return(utils::packageVersion("lme4") < "2.1.1")
+}
+
+# The family that fit_glmer_callback() and fit_gamm_callback() pass to lme4. For
+# another family name, lme4 calls the R function `aic` of the family. So for
+# the lme4 versions of lme4_needs_glmer_family(), this function renames the
+# binomial and the Poisson family and gives them an `aic` with the continuous
+# extension of the log density (lgamma() instead of the factorial), as lme4 >=
+# 2.1-1 uses. For integer data, `aic` does not change. For lme4 >= 2.1-0,
+# `dispersion = 1` marks the dispersion as fixed.
+glmer_family <- function(family) {
+  if (!isTRUE(family$family %in% c("binomial", "poisson")) ||
+      !lme4_needs_glmer_family()) {
+    return(family)
+  }
+  # The terms with a zero count are 0, also for `mu` at the bounds:
+  if (family$family == "binomial") {
+    family$aic <- function(y, n, mu, wt, dev) {
+      m <- if (any(n > 1)) n else wt
+      k <- m * y
+      ll <- lgamma(m + 1) - lgamma(k + 1) - lgamma(m - k + 1) +
+        ifelse(k == 0, 0, k * log(mu)) +
+        ifelse(m - k == 0, 0, (m - k) * log1p(-mu))
+      -2 * sum(ifelse(m > 0, wt / m, 0) * ll)
+    }
+  } else {
+    family$aic <- function(y, n, mu, wt, dev) {
+      -2 * sum(wt * (ifelse(y == 0, 0, y * log(mu)) - mu - lgamma(y + 1)))
+    }
+  }
+  environment(family$aic) <- baseenv()
+  family$family <- paste0(family$family, "_projpred")
+  family$dispersion <- 1
+  return(family)
+}
+
+# The control of lme4::glmer() and gamm4::gamm4() for the family from
+# glmer_family(). lme4 >= 2.1-0 computes a correction for the estimation of the
+# dispersion of a family with another name than "binomial" and "poisson". It is
+# not used for a fixed dispersion, but its computation (a QR decomposition) can
+# take long or fail. lme4::glmer() passes a plain list to lme4::glmerControl(),
+# so the element is added only if glmerControl() has this argument.
+glmer_control <- function(control, family) {
+  if (family$family %in% c("binomial_projpred", "poisson_projpred") &&
+      is.list(control) &&
+      "disp_dof_correction" %in% names(formals(lme4::glmerControl))) {
+    control$disp_dof_correction <- FALSE
+  }
+  return(control)
+}
+
+# The data for the family from glmer_family(). lme4 accepts a factor response
+# (augmented-data projection) only for the family name "binomial". As in
+# binomial()$initialize, the first factor level is a failure and all other
+# levels are successes. Only a response that is a variable name is converted
+# (the response of projpred's submodel formulas is always a name).
+glmer_data <- function(data, formula, family) {
+  if (!identical(family$family, "binomial_projpred") || is.null(data) ||
+      length(formula) != 3 || !is.name(formula[[2]])) {
+    return(data)
+  }
+  y_nm <- as.character(formula[[2]])
+  if (is.factor(data[[y_nm]])) {
+    y <- data[[y_nm]]
+    data[[y_nm]] <- as.numeric(y != levels(y)[1])
+  }
+  return(data)
+}
+
+# Whether the multilevel `formula` has a single scalar group-level term (one
+# term after reformulas::findbars(), with one model-matrix column), the case in
+# which lme4::glmer() accepts `nAGQ > 1`. `TRUE` also if the number of columns
+# cannot be computed (then the refit with a larger `nAGQ` runs).
+glmer_scalar_re <- function(formula, data = NULL) {
+  bars <- reformulas::findbars(formula)
+  if (length(bars) != 1) {
+    return(FALSE)
+  }
+  fml_lhs <- stats::as.formula(call("~", bars[[1]][[2]]))
+  environment(fml_lhs) <- environment(formula)
+  n_col <- tryCatch(
+    ncol(stats::model.matrix(fml_lhs, data = data)),
+    error = function(e) NA_integer_
+  )
+  return(is.na(n_col) || n_col == 1L)
+}
+
+# lme4::checkConv() for the lme4 part `fit$mer` of a gamm4::gamm4() fit
+# (gamm4::gamm4() does not call it). If the check finds a problem, the result
+# goes to `fit$mer@optinfo$conv$lme4` for check_conv_s(). The lower bounds of
+# the fixed effects are `-Inf`, and the upper bounds of all parameters are
+# `Inf`. As in lme4::lmer() and lme4::glmer() with the default `calc.derivs`,
+# there is no check if the number of observations is at least
+# `check.conv.nobsmax` or the number of parameters is at least
+# `check.conv.nparmax`. The differences from lme4::checkConv() are:
+# * The Hessian is not checked. The smoothing parameters are variance
+#   parameters of `fit$mer`, and the finite-difference Hessian of large
+#   variance parameters is too inexact.
+# * If the scaled gradient cannot be evaluated (Hessian not positive definite,
+#   or `NA`), the unscaled gradient is used (lme4::checkConv() gives "unable to
+#   evaluate scaled gradient").
+# * A fit at a boundary (singular fit) gets no message and no result.
+# * `check.conv.grad$relTol` is not used.
+# * The action "message" of `check.conv.grad` gives a warning
+#   (lme4::checkConv() gives an error).
+# * The message gives the index of the largest gradient component
+#   (lme4::checkConv() always gives component 1) and no help text.
+gamm_check_conv <- function(fit, control) {
+  mer <- fit$mer
+  ctrl <- control$checkConv
+  derivs <- if (inherits(mer, "merMod")) mer@optinfo$derivs
+  if (is.null(derivs) || is.null(ctrl) || !is.null(mer@optinfo$conv$lme4)) {
+    return(fit)
+  }
+  coefs <- mer@optinfo$val
+  lbound <- c(mer@lower, rep(-Inf, length(coefs) - length(mer@lower)))
+  if (min(coefs - lbound) < (ctrl$check.conv.singular$tol %||% 1e-4) ||
+      nrow(mer@frame) >= (ctrl$check.conv.nobsmax %||% Inf) ||
+      length(coefs) >= (ctrl$check.conv.nparmax %||% Inf)) {
+    return(fit)
+  }
+  grad <- derivs$gradient
+  ctrl_grad <- ctrl$check.conv.grad
+  if (anyNA(grad)) {
+    # As in lme4::checkConv(), without a warning:
+    cc <- list(code = -5L, messages = "Gradient contains NAs")
+  } else {
+    if (is.null(ctrl_grad$tol) || identical(ctrl_grad$action, "ignore")) {
+      return(fit)
+    }
+    scgrad <- tryCatch(solve(chol(derivs$Hessian), grad),
+                       error = function(e) NULL)
+    mingrad <- abs(grad)
+    if (!is.null(scgrad) && !anyNA(scgrad)) {
+      mingrad <- pmin(abs(scgrad), mingrad)
+    }
+    if (max(mingrad) <= ctrl_grad$tol) {
+      return(fit)
+    }
+    cc <- list(code = -1L, messages = sprintf(
+      "Model failed to converge with max|grad| = %g (tol = %g, component %d)",
+      max(mingrad), ctrl_grad$tol, which.max(mingrad)
+    ))
+    if (identical(ctrl_grad$action, "stop")) {
+      stop(cc$messages, call. = FALSE)
+    }
+    warning(cc$messages, call. = FALSE)
+  }
+  mer@optinfo$conv$lme4 <- cc
+  fit$mer <- mer
+  return(fit)
+}
+
 # Helper function for fit_glmer_callback() and fit_gamm_callback() to get the
 # appropriate control options depending on the family:
 control_callback <- function(family, ...) {
@@ -615,17 +1893,16 @@ control_callback <- function(family, ...) {
              getOption("projpred.gaussian_not_as_generalized", TRUE)) {
     return(lme4::lmerControl(...))
   } else {
-    return(lme4::glmerControl(...))
+    # Use BOBYQA in both stages of lme4::glmer() unless the caller sets an
+    # optimizer. lme4's default for stage 2, Nelder-Mead, needs more deviance
+    # evaluations.
+    ctrl_args <- list(...)
+    if (is.null(ctrl_args[["optimizer"]])) ctrl_args[["optimizer"]] <- "bobyqa"
+    return(do.call(lme4::glmerControl, ctrl_args))
   }
 }
 
 ## Augmented-data projection ----------------------------------------------
-
-# Needed to avoid a NOTE in `R CMD check`:
-if (getRversion() >= package_version("2.15.1")) {
-  utils::globalVariables("projpred_w_aug_s")
-  utils::globalVariables("projpred_internal_w_aug")
-}
 
 divmin_augdat <- function(
     formula,
@@ -711,6 +1988,49 @@ divmin_augdat <- function(
   projpred_ws_aug <- unclass(projpred_ws_aug)
   attr(projpred_ws_aug, "ndiscrete") <- NULL
 
+  # Remove the rows of the observations with weight 0 (in validated LOO CV, the
+  # left-out observation) in all response categories before the submodel
+  # fitters. mclogit::mblogit() uses the predictor values of rows with weight
+  # 0, and MASS::polr() gives no coefficient for a factor level that only these
+  # rows have. The augmented data hold all observations for the first category,
+  # then all for the second, and so on. If the sizes do not match (not in
+  # projpred's own calls), nothing is removed.
+  lost_lvls <- NULL
+  if (is.data.frame(data) && length(weights) > 0 &&
+      any(weights == 0) && nrow(data) %% length(weights) == 0 &&
+      nrow(data) == nrow(projpred_ws_aug)) {
+    keep <- rep(weights != 0, times = nrow(data) / length(weights))
+    lost_lvls <- lost_levels(data, keep = keep, formula = formula)
+    data <- drop_lost_levels(data[keep, , drop = FALSE], lost_lvls)
+    projpred_ws_aug <- projpred_ws_aug[keep, , drop = FALSE]
+  }
+
+  # Cumulative-link submodels without group-level terms: all draws in one C++
+  # call (see cumul_native_multi()):
+  if (identical(sdivmin, fit_cumul)) {
+    outdmin <- cumul_native_multi(formula, data = data, family = family,
+                                  ws_aug = projpred_ws_aug,
+                                  dot_args = list(...))
+    if (!is.null(outdmin)) {
+      check_conv(outdmin, rep(0L, length(outdmin)), do_check = do_check_conv)
+      attr(outdmin, "projpred_lost_lvls") <- lost_lvls
+      return(outdmin)
+    }
+  }
+
+  # Multinomial-logit submodels without group-level terms: all draws in one C++
+  # call (see categ_native_multi()):
+  if (identical(sdivmin, fit_categ)) {
+    outdmin <- categ_native_multi(formula, data = data, family = family,
+                                  ws_aug = projpred_ws_aug,
+                                  dot_args = list(...))
+    if (!is.null(outdmin)) {
+      check_conv(outdmin, rep(0L, length(outdmin)), do_check = do_check_conv)
+      attr(outdmin, "projpred_lost_lvls") <- lost_lvls
+      return(outdmin)
+    }
+  }
+
   if (is.null(getOption("projpred.parallel_proj_trigger")) &&
       !is.null(getOption("projpred.prll_prj_trigger"))) {
     warning(
@@ -722,11 +2042,12 @@ divmin_augdat <- function(
   } else {
     prll_prj_trigger <- getOption("projpred.parallel_proj_trigger", Inf)
   }
-  if (ncol(projpred_ws_aug) < prll_prj_trigger) {
-    # Sequential case. Actually, we could simply use ``%do_projpred%` <-
-    # foreach::`%do%`` here and then proceed as in the parallel case, but that
-    # would require adding more "hard" dependencies (because packages 'foreach'
-    # and 'iterators' would have to be moved from `Suggests:` to `Imports:`).
+  # The backend of the parallel case (`NULL` without parallel workers):
+  backend <- if (ncol(projpred_ws_aug) >= prll_prj_trigger) {
+    par_backend(warn_once = TRUE)
+  }
+  if (is.null(backend)) {
+    # Sequential case.
     if (verbose_divmin) {
       pb <- utils::txtProgressBar(min = 0, max = ncol(projpred_ws_aug),
                                   style = 3, initial = 0, file = stderr())
@@ -747,37 +2068,20 @@ divmin_augdat <- function(
           ...
         )
       )
-      return(nlist(soutdmin, mssgs_warns_capt))
+      return(nlist(soutdmin = strip_call_data(soutdmin), mssgs_warns_capt))
     })
   } else {
-    # Parallel case.
-    if (!requireNamespace("foreach", quietly = TRUE)) {
-      stop("Please install the 'foreach' package.")
-    }
-    if (!requireNamespace("iterators", quietly = TRUE)) {
-      stop("Please install the 'iterators' package.")
-    }
-    if (verbose_divmin && use_progressr()) {
-      progressor_obj <- progressr::progressor(ncol(projpred_ws_aug))
-    } else {
-      progressor_obj <- NULL
-    }
+    # Parallel case. The projection of one draw, in an environment with only
+    # the objects that it uses (see fun_with_objs()) and the projpred
+    # namespace as parent:
     dot_args <- list(...)
-    `%do_projpred%` <- foreach::`%dopar%`
-    outdmin <- foreach::foreach(
-      projpred_w_aug_s = iterators::iter(projpred_ws_aug, by = "column"),
-      .packages = c("projpred"),
-      .export = c(
-        "sdivmin", "formula", "data", "family", "projpred_formula_no_random",
-        "projpred_random", "dot_args", "progressor_obj"
-      ),
-      .noexport = c(
-        "object", "p_sel", "search_path", "p_ref", "refmodel", "projpred_var",
-        "projpred_ws_aug", "linkobjs"
-      ),
-      .errorhandling = getOption("projpred.foreach_errorhandling", "stop"),
-      .verbose = getOption("projpred.foreach_verbose", FALSE)
-    ) %do_projpred% {
+    # The option of the Laplace fit (see mlvl_laplace() and
+    # mlvl_laplace_cumul()), read in this R process:
+    if (identical(sdivmin, fit_glmer_callback) ||
+        identical(sdivmin, fit_cumul_mlvl)) {
+      dot_args$mlvl_laplace <- getOption("projpred.mlvl_laplace", TRUE)
+    }
+    one_draw <- fun_with_objs(function(projpred_w_aug_s) {
       mssgs_warns_capt <- capt_mssgs_warns(
         soutdmin <- do.call(
           sdivmin,
@@ -790,9 +2094,14 @@ divmin_augdat <- function(
             dot_args)
         )
       )
-      if (!is.null(progressor_obj)) progressor_obj()
-      return(nlist(soutdmin, mssgs_warns_capt))
-    }
+      return(nlist(soutdmin = strip_call_data(soutdmin), mssgs_warns_capt))
+    }, c("sdivmin", "formula", "data", "family", "projpred_formula_no_random",
+         "projpred_random", "dot_args"))
+    ws_draws <- lapply(seq_len(ncol(projpred_ws_aug)), function(s) {
+      projpred_ws_aug[, s]
+    })
+    outdmin <- par_lapply(ws_draws, one_draw, .backend = backend,
+                          .progress = verbose_divmin)
   }
   mssgs_warns_capts <- lapply(outdmin, "[[", "mssgs_warns_capt")
   outdmin <- lapply(outdmin, "[[", "soutdmin")
@@ -816,6 +2125,7 @@ divmin_augdat <- function(
   })
   warn_prj_drawwise(mssgs_warns_capts, throw_warn = throw_warn_sdivmin)
   check_conv(outdmin, lengths(mssgs_warns_capts), do_check = do_check_conv)
+  attr(outdmin, "projpred_lost_lvls") <- lost_lvls
   return(outdmin)
 }
 
@@ -885,9 +2195,108 @@ fit_cumul <- function(formula, data, family, weights, ...) {
   return(fitobj)
 }
 
-# Use ordinal::clmm() to fit multilevel submodels for the brms::cumulative()
-# family:
-fit_cumul_mlvl <- function(formula, data, family, weights, ...) {
+# Fits the cumulative-link submodels of all draws in one C++ call
+# (cumul_fit_multi_c()) with the objective of MASS::polr(), instead of one
+# fit_cumul() call per draw. The augmented data hold C copies of the n
+# observations (one per response category), so this builds the model matrix
+# once, and the augmented weights of each draw form an n x C matrix. Newton
+# iterations replace the BFGS iterations of polr(), so the estimates agree with
+# those of polr() up to its convergence tolerance. The returned `polr` objects
+# hold the elements that predict.polr() (with `newdata`), coef() and
+# check_conv_s() use, without `fitted.values` and `lp`. Returns `NULL` for other
+# cases; divmin_augdat() then calls fit_cumul() per draw. Global option
+# `projpred.augdat_native = FALSE` switches this off.
+cumul_native_multi <- function(formula, data, family, ws_aug, dot_args) {
+  if (!getOption("projpred.augdat_native", TRUE)) {
+    return(NULL)
+  }
+  # fit_cumul() passes these arguments on to MASS::polr(); they are not
+  # reproduced here:
+  if (length(intersect(names(dot_args),
+                       c(methods::formalArgs(MASS::polr),
+                         methods::formalArgs(stats::optim))))) {
+    return(NULL)
+  }
+  method <- family$link
+  if (method == "logit") {
+    method <- "logistic"
+  } else if (method == "probit_approx") {
+    method <- "probit"
+  }
+  link_code <- match(method, c("logistic", "probit", "loglog", "cloglog",
+                               "cauchit"))
+  if (is.na(link_code)) {
+    return(NULL)
+  }
+  # As in MASS::polr():
+  mfr <- model.frame(formula, data = data)
+  if (nrow(mfr) != nrow(data) || !is.null(model.offset(mfr))) {
+    return(NULL)
+  }
+  trms <- attr(mfr, "terms")
+  x <- model.matrix(trms, mfr)
+  cons <- attr(x, "contrasts")
+  xint <- match("(Intercept)", colnames(x), nomatch = 0L)
+  if (xint == 0L) {
+    return(NULL)
+  }
+  x <- x[, -xint, drop = FALSE]
+  y <- model.response(mfr)
+  if (!is.factor(y)) {
+    return(NULL)
+  }
+  lev <- levels(y)
+  ncat <- length(lev)
+  n <- nrow(x) %/% ncat
+  ws_aug <- as.matrix(ws_aug)
+  # The augmented data have to be C copies of the n observations, in the order
+  # of the response categories:
+  if (ncat < 3L || n * ncat != nrow(x) || nrow(ws_aug) != nrow(x) ||
+      !identical(as.integer(y), rep(seq_len(ncat), each = n)) ||
+      !all(is.finite(ws_aug)) || any(ws_aug < 0)) {
+    return(NULL)
+  }
+  x1 <- x[seq_len(n), , drop = FALSE]
+  # Non-finite predictor values go to polr() (the C++ fitter returns a
+  # non-converged fit for them):
+  if (!all(is.finite(x1)) ||
+      (ncol(x1) > 0 &&
+       !isTRUE(all(x == x1[rep(seq_len(n), ncat), , drop = FALSE])))) {
+    return(NULL)
+  }
+  nprj <- ncol(ws_aug)
+  out <- cumul_fit_multi_c(
+    unname(x1), matrix(ws_aug, nrow = n), ncat, rep(0, n), link_code,
+    thresh = 1e-12, maxit = 100L
+  )
+  xlvls <- .getXlevels(trms, mfr)
+  zeta_nms <- paste(lev[-ncat], lev[-1L], sep = "|")
+  pc <- ncol(x1)
+  # As in polr(), also for a submodel without predictors:
+  beta_nms <- colnames(x1) %||% character()
+  return(lapply(seq_len(nprj), function(s) {
+    beta <- setNames(out$beta[, s], beta_nms)
+    zeta <- setNames(out$zeta[, s], zeta_nms)
+    wsum <- sum(ws_aug[, s])
+    structure(
+      list(coefficients = beta, zeta = zeta, deviance = 2 * out$loss[s],
+           lev = lev, terms = trms, df.residual = wsum - pc - (ncat - 1L),
+           edf = pc + ncat - 1L, n = wsum, nobs = wsum,
+           call = quote(projpred_cumul_fit()), method = method,
+           convergence = out$convergence[s],
+           niter = c(f.evals = out$niter[s], g.evals = out$niter[s]),
+           contrasts = cons, xlevels = xlvls),
+      class = "polr"
+    )
+  }))
+}
+
+# Fit multilevel submodels for the brms::cumulative() family: projpred's own
+# Laplace fit for a single group-level intercept term, else ordinal::clmm():
+fit_cumul_mlvl <- function(formula, data, family, weights,
+                           mlvl_laplace = getOption("projpred.mlvl_laplace",
+                                                    TRUE),
+                           ...) {
   # Argument `weights` of ordinal::clmm() expects a column name (as a symbol):
   if ("projpred_internal_w_aug" %in% names(data)) {
     stop("Need to write to column `projpred_internal_w_aug` of `data`, but ",
@@ -895,7 +2304,6 @@ fit_cumul_mlvl <- function(formula, data, family, weights, ...) {
          "try again.")
   }
   stopifnot(length(weights) == nrow(data))
-  data$projpred_internal_w_aug <- weights
   # Exclude arguments from `...` which cannot be passed to ordinal::clmm():
   dot_args <- list(...)
   dot_args <- dot_args[intersect(
@@ -910,6 +2318,30 @@ fit_cumul_mlvl <- function(formula, data, family, weights, ...) {
       methods::formalArgs(stats::nlminb),
       methods::formalArgs(stats::optim))
   )]
+  # A single `(1 | <group>)` term and no arguments for ordinal::clmm() or its
+  # optimizers: projpred's own Laplace fit (see mlvl_laplace_cumul()), with
+  # ordinal::clmm() as the fallback if it does not converge (the fallback fit
+  # is converted to the same class):
+  if (isTRUE(mlvl_laplace) && !length(dot_args)) {
+    fit <- mlvl_laplace_cumul(formula, data = data, family = family,
+                              weights = weights)
+    if (!is.null(fit)) {
+      if (fit$convergence == 0) return(fit)
+      fit_clmm <- fit_cumul_mlvl(formula, data = data, family = family,
+                                 weights = weights, mlvl_laplace = FALSE, ...)
+      return(mlvl_cumul_from_clmm(fit_clmm, formula, failed = fit))
+    }
+  }
+  data$projpred_internal_w_aug <- weights
+  # clmm() has no analytic gradient, so its default optimizer nlminb() spends
+  # most objective evaluations on finite-difference gradients.  ucminf() with
+  # forward differences needs fewer evaluations and gives the same fits within
+  # the optimizer tolerance.  clmm() can use ucminf() only for a single
+  # `(1 | <group>)` term.  Use it then, unless the caller chose an optimizer:
+  bars <- reformulas::findbars(formula)
+  use_ucminf <- is.null(dot_args[["method"]]) &&
+    is.null(dot_args[["control"]]) && length(bars) == 1 &&
+    identical(bars[[1]][[2]], 1)
   # Since ordinal::clmm() sometimes seems to have issues with formulas lacking
   # an intercept, add it here (note that this is a quite "hacky" solution;
   # perhaps reformulate() could be used instead):
@@ -920,21 +2352,63 @@ fit_cumul_mlvl <- function(formula, data, family, weights, ...) {
   if (link_nm == "probit_approx") {
     link_nm <- "probit"
   }
+  # clmm() with a single `(1 | <group>)` term uses C code that swaps the links
+  # "cloglog" and "loglog" (ordinal 2025.12.29, 2026.7-26).  Use its R code
+  # (`useMatrix = TRUE` overrides `control`); this excludes ucminf().
+  if (link_nm %in% c("cloglog", "loglog")) {
+    dot_args$useMatrix <- TRUE
+    use_ucminf <- FALSE
+  }
   # Call the submodel fitter:
-  fitobj <- do.call(ordinal::clmm, c(
-    list(formula = formula,
-         data = data,
-         weights = quote(projpred_internal_w_aug),
-         contrasts = NULL,
-         Hess = FALSE,
-         model = FALSE,
-         link = link_nm),
-    dot_args
-  ))
-  # Needed for the ordinal:::predict.clm() workaround (the value `"negative"` is
-  # the default, see `?ordinal::clm.control`):
-  fitobj$control$sign.location <- "negative"
-  return(fitobj)
+  fit_clmm <- function(dot_args) {
+    fitobj <- do.call(ordinal::clmm, c(
+      list(formula = formula,
+           data = data,
+           weights = quote(projpred_internal_w_aug),
+           contrasts = NULL,
+           Hess = FALSE,
+           model = FALSE,
+           link = link_nm),
+      dot_args
+    ))
+    # Needed for the ordinal:::predict.clm() workaround (the value `"negative"`
+    # is the default, see `?ordinal::clm.control`):
+    fitobj$control$sign.location <- "negative"
+    return(fitobj)
+  }
+  if (use_ucminf) {
+    # If ucminf() fails or does not converge, refit with the nlminb() default:
+    return(fit_with_fallback(
+      function() fit_clmm(c(dot_args, list(method = "ucminf",
+                                           grad = "forward"))),
+      function() fit_clmm(dot_args),
+      accept = check_conv_s
+    ))
+  }
+  return(fit_clmm(dot_args))
+}
+
+# Return `fit_first()` if it gives no error and `accept()` returns `TRUE` for
+# its result; then signal its warnings and messages again.  Otherwise return
+# `fit_second()`, without the warnings and messages of `fit_first()`.
+fit_with_fallback <- function(fit_first, fit_second, accept) {
+  conds <- list()
+  keep_cond <- function(cnd, restart) {
+    conds[[length(conds) + 1L]] <<- cnd
+    invokeRestart(restart)
+  }
+  res <- try(withCallingHandlers(
+    fit_first(),
+    warning = function(w) keep_cond(w, "muffleWarning"),
+    message = function(m) keep_cond(m, "muffleMessage")
+  ), silent = TRUE)
+  if (!inherits(res, "try-error") && isTRUE(accept(res))) {
+    for (cnd in conds) {
+      if (inherits(cnd, "warning")) warning(cnd) else message(cnd)
+    }
+    return(res)
+  }
+  return(fit_second())
 }
 
 # Use nnet::multinom() to fit submodels for the brms::categorical() family:
@@ -988,6 +2462,104 @@ fit_categ <- function(formula, data, family, weights, ...) {
   return(fitobj)
 }
 
+# Fits the multinomial-logit submodels of all draws in one C++ call
+# (categ_fit_multi_c()) with the objective of nnet::multinom(), instead of one
+# fit_categ() call per draw. Like cumul_native_multi(), it builds the model
+# matrix once and uses the augmented weights as an n x C matrix. Newton
+# iterations replace the BFGS iterations of nnet::multinom() (by default at
+# most 100), so the estimates agree with those of nnet::multinom() up to its
+# convergence tolerance. The returned objects are copies of one `multinom`
+# object (from nnet::multinom() with `maxit = 0`) with the weights, the
+# objective and the fitted values of each draw. Returns `NULL` for other cases;
+# divmin_augdat() then calls fit_categ() per draw. Global option
+# `projpred.augdat_native = FALSE` switches this off.
+categ_native_multi <- function(formula, data, family, ws_aug, dot_args) {
+  if (!getOption("projpred.augdat_native", TRUE) || family$link != "logit") {
+    return(NULL)
+  }
+  # fit_categ() passes these arguments on to nnet::multinom(); they are not
+  # reproduced here:
+  if (length(intersect(names(dot_args),
+                       c(methods::formalArgs(nnet::multinom),
+                         methods::formalArgs(nnet::nnet))))) {
+    return(NULL)
+  }
+  mfr <- model.frame(formula, data = data)
+  if (nrow(mfr) != nrow(data) || !is.null(model.offset(mfr))) {
+    return(NULL)
+  }
+  trms <- attr(mfr, "terms")
+  x <- model.matrix(trms, mfr)
+  y <- model.response(mfr)
+  if (!is.factor(y)) {
+    return(NULL)
+  }
+  lev <- levels(y)
+  ncat <- length(lev)
+  n <- nrow(x) %/% ncat
+  ws_aug <- as.matrix(ws_aug)
+  # The augmented data have to be C copies of the n observations, in the order
+  # of the response categories:
+  if (ncat < 3L || n * ncat != nrow(x) || nrow(ws_aug) != nrow(x) ||
+      !identical(as.integer(y), rep(seq_len(ncat), each = n)) ||
+      !all(is.finite(ws_aug)) || any(ws_aug < 0)) {
+    return(NULL)
+  }
+  x1 <- x[seq_len(n), , drop = FALSE]
+  # Non-finite predictor values go to nnet::multinom():
+  if (!all(is.finite(x1)) ||
+      !isTRUE(all(x == x1[rep(seq_len(n), ncat), , drop = FALSE]))) {
+    return(NULL)
+  }
+  # The template object (no iterations, so its weights are the zero start
+  # values):
+  tmpl <- do.call(nnet::multinom, list(formula = formula, data = data,
+                                       weights = ws_aug[, 1], maxit = 0,
+                                       trace = FALSE))
+  if (!identical(tmpl$vcoefnames, colnames(x1)) || tmpl$n[3L] != ncat ||
+      length(tmpl$wts) != ncat * (ncol(x1) + 1L)) {
+    return(NULL)
+  }
+  icpt <- match("(Intercept)", colnames(x1), nomatch = 0L) - 1L
+  nprj <- ncol(ws_aug)
+  out <- categ_fit_multi_c(unname(x1), matrix(ws_aug, nrow = n), ncat, icpt,
+                           thresh = 1e-12, maxit = 100L)
+  y_ind <- diag(ncat)[as.integer(y), , drop = FALSE]
+  dimnames(y_ind) <- dimnames(tmpl$fitted.values)
+  idx_aug <- rep(seq_len(n), ncat)
+  idx_rows <- seq_len(n)
+  # A loop instead of lapply() with an anonymous function, which the byte
+  # compiler would compile again for each projection:
+  outdmin <- vector("list", nprj)
+  for (s in seq_len(nprj)) {
+    coef_s <- out$coef[, , s]
+    dim(coef_s) <- dim(out$coef)[1:2]
+    # Weights as nnet::multinom() stores them (see nnet:::coef.multinom()):
+    # one row per category, the first column and the first row (reference
+    # category) zero:
+    wts_mat <- matrix(0, ncat, ncol(x1) + 1L)
+    wts_mat[-1L, -1L] <- t(coef_s)
+    eta <- cbind(0, x1 %*% coef_s)
+    eta_max <- eta[cbind(idx_rows, max.col(eta, ties.method = "first"))]
+    prbs <- exp(eta - eta_max)
+    prbs <- prbs / rowSums(prbs)
+    fitted_s <- prbs[idx_aug, , drop = FALSE]
+    dimnames(fitted_s) <- dimnames(tmpl$fitted.values)
+    fit_s <- tmpl
+    fit_s$wts <- as.vector(t(wts_mat))
+    fit_s$value <- out$loss[s]
+    fit_s$deviance <- 2 * out$loss[s]
+    fit_s$AIC <- fit_s$deviance + 2 * fit_s$edf
+    fit_s$convergence <- out$convergence[s]
+    fit_s$weights <- ws_aug[, s]
+    fit_s$fitted.values <- fitted_s
+    fit_s$residuals <- y_ind - fitted_s
+    fit_s$call <- quote(projpred_categ_fit())
+    outdmin[[s]] <- fit_s
+  }
+  return(outdmin)
+}
+
 # Use mclogit::mblogit() to fit multilevel submodels for the brms::categorical()
 # family:
 fit_categ_mlvl <- function(formula, projpred_formula_no_random,
@@ -1004,6 +2576,17 @@ fit_categ_mlvl <- function(formula, projpred_formula_no_random,
   if (link_nm != "logit") {
     stop("For the brms::categorical() family, projpred only supports the ",
          "logit link.")
+  }
+  # repair_re() and get_subparams() for `mmblogit` objects need one covariance
+  # matrix per group-level term over all latent categories:
+  if (!is.null(dot_args$catCov)) {
+    cat_cov <- match.arg(dot_args$catCov, c("free", "diagonal", "single"))
+    if (cat_cov != "free") {
+      stop("For multilevel submodels of the brms::categorical() family, ",
+           "projpred only supports `catCov = \"free\"`.")
+    }
+    # categ_pql_fit() fits this model:
+    dot_args$catCov <- NULL
   }
   # Handle offsets (but note that currently, offsets in the submodel fitter are
   # unexpected; this case could only occur in `test_div_minimizer.R`):
@@ -1034,6 +2617,34 @@ fit_categ_mlvl <- function(formula, projpred_formula_no_random,
   random_fmls <- lapply(random_trms, function(random_trm) {
     as.formula(paste("~", random_trm))
   })
+  # Contrasts of the factors in the group-level terms, for repair_re.mmblogit():
+  re_ctrs <- re_contrasts(data, projpred_random)
+  # Use categ_pql_fit() unless there are offsets, global option
+  # `projpred.categ_mlvl_mblogit` is `TRUE`, or `...` has mblogit() settings
+  # that categ_pql_fit() does not support.  In mclogit's PQL algorithm,
+  # `avoid.increase` and `break.on.infinite` have no effect, and `trace` and
+  # `trace.inner` only print the iterations:
+  pql_args <- c("epsilon", "maxit", "maxit.inner")
+  no_effect_args <- c("trace", "trace.inner", "avoid.increase",
+                      "break.on.infinite")
+  break_args <- c("break.on.increase", "break.on.negative")
+  if (!getOption("projpred.categ_mlvl_mblogit", FALSE) && !length(offs_attr) &&
+      all(names(dot_args) %in% c(pql_args, no_effect_args, break_args)) &&
+      !any(vapply(dot_args[intersect(names(dot_args), break_args)],
+                  isTRUE, logical(1)))) {
+    mat_resp <- categ_mat_resp(projpred_formula_no_random, data, weights)
+    if (!is.null(mat_resp)) {
+      fitobj <- do.call(categ_pql_fit, c(
+        list(formula = mat_resp$formula, random = random_fmls,
+             data = mat_resp$data),
+        dot_args[intersect(names(dot_args), pql_args)]
+      ))
+      if (!is.null(fitobj)) {
+        fitobj$re_contrasts <- re_ctrs
+        return(fitobj)
+      }
+    }
+  }
   if (length(random_fmls) == 1) {
     random_fmls <- random_fmls[[1]]
   }
@@ -1058,6 +2669,7 @@ fit_categ_mlvl <- function(formula, projpred_formula_no_random,
       "fitting procedure did not converge."
     )
   }
+  fitobj$re_contrasts <- re_ctrs
   return(fitobj)
 }
 
@@ -1127,22 +2739,37 @@ check_conv <- function(outdmin, lengths_mssgs_warns, do_check = TRUE) {
 # Helper function for checking the convergence of a single submodel fit (not of
 # a whole `outdmin` object):
 check_conv_s <- function(fit_s) {
-  if (inherits(fit_s, "mmblogit")) {
+  if (inherits(fit_s, "projpred_mlvl")) {
+    return(isTRUE(fit_s$convergence == 0))
+  } else if (inherits(fit_s, "mmblogit")) {
     return(fit_s$converged)
   } else if (inherits(fit_s, "multinom")) {
     return(fit_s$convergence == 0)
   } else if (inherits(fit_s, "clmm")) {
+    if (is.null(fit_s$optRes$objective)) {
+      # No `objective` (which nlminb() returns), so ucminf() ran.  Its codes:
+      # 1 (small gradient), 2 (small step) and 4 (zero step in the line
+      # search, which forward differences can cause near the optimum).
+      # `gradient` is the central-difference gradient after the fit; the
+      # limit is absolute, as `grtol` of ucminf():
+      return(fit_s$optRes$convergence %in% c(1, 2, 4) &&
+               all(is.finite(fit_s$gradient)) &&
+               max(abs(fit_s$gradient)) < 1e-3)
+    }
     return(fit_s$optRes$convergence == 0)
   } else if (inherits(fit_s, "polr")) {
     return(fit_s$convergence == 0)
   } else if (inherits(fit_s, "gam")) {
-    # TODO (GAMs): Is this correct?:
-    return(fit_s$converged && fit_s$mgcv.conv$fully.converged %||% TRUE)
+    # `converged`: P-IRLS iterations. `mgcv.conv`: smoothing parameter
+    # optimization with "magic". `outer.info`: smoothing parameter optimization
+    # with the other optimizers (see gam_outer_conv()).
+    return(isTRUE(fit_s$converged %||% TRUE) &&
+             isTRUE(fit_s$mgcv.conv$fully.converged %||% TRUE) &&
+             gam_outer_conv(fit_s$outer.info))
   } else if (inherits(fit_s, "gamm4")) {
-    # TODO (GAMMs): I couldn't find any convergence-related information in
-    # element `fit_s$gam`, so the GAM part is currently not checked for
-    # convergence. For now, all we can check is the GLMM part from element
-    # `fit_s$mer`:
+    # Element `fit_s$gam` has no convergence information. The smoothing
+    # parameters are variance parameters of `fit_s$mer`, which also has the
+    # result of gamm_check_conv():
     return(check_conv_s(fit_s$mer))
   } else if (inherits(fit_s, "glmmPQL")) {
     # MASS::glmmPQL() stores no convergence information: nlme::lme() throws an
@@ -1179,10 +2806,97 @@ check_conv_s <- function(fit_s) {
   }
 }
 
+# Convergence of the smoothing parameter optimization of a mgcv::gam() fit.
+# Argument `outer_info` is element `outer.info` of the fit. Its form depends on
+# the optimizer:
+# * "newton", "bfgs" and "efs": a list with string `conv` ("full convergence",
+#   "step failed" or "iteration limit reached").
+# * c("outer", "nlm"): the nlm() result, with `code`.
+# * c("outer", "optim"): the optim() result, with `convergence`.
+# * "magic" and fits without smoothing parameters: `NULL`.
+# For nlm() and optim(), only the iteration limit (nlm() code 4, optim() code 1)
+# is non-convergence. Other codes can occur at the optimum, for example nlm()
+# code 5 if a smoothing parameter goes to infinity (as for a smooth term of a
+# linear function). `[[` avoids the partial match of `$conv` to `convergence`.
+gam_outer_conv <- function(outer_info) {
+  if (!is.list(outer_info)) {
+    return(TRUE)
+  }
+  if (!is.null(outer_info[["conv"]])) {
+    return(identical(outer_info[["conv"]], "full convergence"))
+  }
+  if (!is.null(outer_info[["code"]])) {
+    return(!isTRUE(any(outer_info[["code"]] == 4)))
+  }
+  if (!is.null(outer_info[["convergence"]])) {
+    return(!isTRUE(any(outer_info[["convergence"]] == 1)))
+  }
+  return(TRUE)
+}
+
 # Prediction functions for submodels --------------------------------------
 
-subprd <- function(fits, newdata) {
+# Predictions of `subfit` objects for the data they were fitted to, computed
+# from the stored model matrices `x` (so no new model matrix is built). `nobs`
+# is the number of observations in the training data. Returns `NULL` if a fit
+# is not of class `subfit` or its `x` does not have `nobs` rows (for example,
+# after model.frame() removed rows with missing values).
+subprd_fitted <- function(fits, nobs) {
+  if (!all(vapply(fits, function(fit) {
+    inherits(fit, "subfit") && NROW(fit$x) == nobs
+  }, logical(1)))) {
+    return(NULL)
+  }
   prd_list <- lapply(fits, function(fit) {
+    # As in predict.subfit():
+    if (is.null(fit$beta)) {
+      return(as.matrix(rep(fit$alpha, nobs)))
+    }
+    return(cbind(1, fit$x) %*% rbind(fit$alpha, fit$beta))
+  })
+  return(do.call(cbind, prd_list))
+}
+
+subprd <- function(fits, newdata) {
+  # Fits of projpred's Laplace fitter (see mlvl_laplace()): all draws at once:
+  if (length(fits) &&
+      all(vapply(fits, inherits, logical(1), "projpred_mlvl"))) {
+    return(subprd_mlvl(fits, newdata))
+  }
+  # lme4 fits of one submodel and `newdata` without new group levels: all draws
+  # at once (see subprd_mer_direct()):
+  prd_direct <- subprd_mer_direct(fits, newdata)
+  if (!is.null(prd_direct)) {
+    return(prd_direct)
+  }
+  # mgcv fits of one submodel: all draws at once (see subprd_gam_direct()):
+  if (!is.null(newdata) && length(fits) > 1 && inherits(fits[[1]], "gam")) {
+    prd_direct <- subprd_gam_direct(
+      fits, cbind(`(Intercept)` = rep(1, NROW(newdata)), newdata)
+    )
+    if (!is.null(prd_direct)) {
+      return(prd_direct)
+    }
+  }
+  # gamm4 fits of one submodel: all draws at once (see subprd_gamm4_direct()):
+  if (!is.null(newdata) && length(fits) > 0 && inherits(fits[[1]], "gamm4")) {
+    prd_direct <- subprd_gamm4_direct(
+      fits, cbind(`(Intercept)` = rep(1, NROW(newdata)), newdata)
+    )
+    if (!is.null(prd_direct)) {
+      return(prd_direct)
+    }
+  }
+  if (!is.null(newdata) && length(fits) > 1 && inherits(fits[[1]], "subfit")) {
+    prd <- subprd_subfit_shared(fits, newdata)
+    if (!is.null(prd)) {
+      return(prd)
+    }
+  }
+  prd_list <- lapply(fits, function(fit) {
+    if (inherits(fit, "projpred_mlvl")) {
+      return(subprd_mlvl(list(fit), newdata)[, 1])
+    }
     is_glmmPQL <- inherits(fit, "glmmPQL")
     is_glmm <- inherits(fit, c("lmerMod", "glmerMod"))
     is_gam_gamm <- inherits(fit, c("gam", "gamm4"))
@@ -1236,11 +2950,118 @@ subprd <- function(fits, newdata) {
   return(do.call(cbind, prd_list))
 }
 
+# Linear predictors of lme4 fits (`lmerMod` or `glmerMod`) of the same submodel
+# for `newdata` whose group levels all occur in the fits. In this case,
+# repair_re() adds zero and draws no random numbers, and predict.merMod() with
+# `re.form = NULL` computes X beta_s + Z b_s. This function builds the
+# fixed-effects model matrix X and the random-effects design Z for `newdata`
+# once; it follows the steps of predict.merMod() (R package lme4, GPL (>= 2);
+# see the file LICENSE). It maps the conditional modes b_s of each draw (in the
+# row order of the fitted Zt) onto the rows of Z by the names of the group
+# levels. These names are unique across the grouping variables (see
+# repair_re.merMod()), and within a grouping variable they have the same order
+# of terms and coefficients in both. The results differ from those of subprd()
+# only by rounding. Returns `NULL` for other cases.
+subprd_mer_direct <- function(fits, newdata) {
+  if (is.null(newdata) || length(fits) == 0 ||
+      getOption("projpred.mlvl_pred_new", FALSE) ||
+      !all(vapply(fits, inherits, logical(1), c("lmerMod", "glmerMod")))) {
+    return(NULL)
+  }
+  fit_1 <- fits[[1]]
+  flist_1 <- lapply(fit_1@flist, levels)
+  cnms_1 <- lme4::getME(fit_1, "cnms")
+  trms_fix <- delete.response(terms(fit_1, fixed.only = TRUE))
+  # The terms are compared without their environment:
+  terms_noenv <- function(trms) {
+    attr(trms, ".Environment") <- NULL
+    trms
+  }
+  trms_fix_noenv <- terms_noenv(trms_fix)
+  same_structure <- vapply(fits, function(fit) {
+    trms_s <- delete.response(terms(fit, fixed.only = TRUE))
+    identical(lapply(fit@flist, levels), flist_1) &&
+      identical(lme4::getME(fit, "cnms"), cnms_1) &&
+      identical(terms_noenv(trms_s), trms_fix_noenv) &&
+      identical(names(lme4::fixef(fit)), names(lme4::fixef(fit_1)))
+  }, logical(1))
+  if (!all(same_structure) || !is.null(attr(trms_fix, "offset"))) {
+    return(NULL)
+  }
+  # Group levels: all have to occur in the fits, and the level sets have to be
+  # disjoint (otherwise repair_re.merMod() handles the case):
+  vnms <- names(flist_1)
+  if (!all(vnms %in% names(newdata))) {
+    return(NULL)
+  }
+  for (vnm in vnms) {
+    if (!all(as.character(unique(newdata[[vnm]])) %in% flist_1[[vnm]])) {
+      return(NULL)
+    }
+  }
+  lvls_all <- unlist(flist_1, use.names = FALSE)
+  if (anyDuplicated(lvls_all)) {
+    return(NULL)
+  }
+  # Fixed effects, as in predict.merMod():
+  x_contr <- attr(lme4::getME(fit_1, "X"), "contrasts")
+  mfr <- model.frame(trms_fix, newdata, na.action = na.pass,
+                     xlev = .getXlevels(trms_fix, fit_1@frame))
+  x_new <- model.matrix(trms_fix, mfr, contrasts.arg = x_contr)
+  fix_nms <- names(lme4::fixef(fit_1))
+  if (!all(fix_nms %in% colnames(x_new)) || anyNA(x_new) ||
+      nrow(x_new) != nrow(newdata)) {
+    return(NULL)
+  }
+  x_new <- x_new[, fix_nms, drop = FALSE]
+  # Random effects:
+  re_new <- lme4::mkNewReTrms(fit_1, newdata = newdata,
+                              re.form = ("lme4" %:::% "reOnly")(formula(fit_1)),
+                              allow.new.levels = TRUE)
+  zt_new <- re_new$Zt
+  occ_key <- function(nms) paste(nms, stats::ave(seq_along(nms), nms,
+                                                 FUN = seq_along), sep = "\r")
+  idx_b <- match(occ_key(rownames(zt_new)),
+                 occ_key(rownames(lme4::getME(fit_1, "Zt"))))
+  if (anyNA(idx_b)) {
+    return(NULL)
+  }
+  b_1 <- as.vector(lme4::getME(fit_1, "b"))
+  if (!isTRUE(all.equal(unname(b_1[idx_b]), unname(as.vector(re_new$b)),
+                        tolerance = 1e-12))) {
+    return(NULL)
+  }
+  betas <- do.call(cbind, lapply(fits, lme4::fixef))
+  bs <- do.call(cbind, lapply(fits, function(fit) {
+    as.vector(lme4::getME(fit, "b"))[idx_b]
+  }))
+  prd <- x_new %*% betas + t(as(t(bs) %*% zt_new, "matrix"))
+  # As cbind() of the named vectors from predict.merMod():
+  dimnames(prd) <- list(rownames(newdata), NULL)
+  return(prd)
+}
+
 subprd_augdat <- function(fits, newdata) {
-  if (inherits(fits[[1]], "clmm")) {
-    y_nm <- extract_terms_response(formula(fits[[1]]))$response
+  # `polr` and `multinom` fits of the same submodel: linear predictors from the
+  # coefficients, for all draws at once (see subprd_augdat_direct()):
+  prd_direct <- subprd_augdat_direct(fits, newdata)
+  if (!is.null(prd_direct)) {
+    return(prd_direct)
+  }
+  # Fits of projpred's Laplace fitter (see mlvl_laplace_cumul()): all draws at
+  # once:
+  if (length(fits) > 0 &&
+      all(vapply(fits, inherits, logical(1), "projpred_mlvl_cumul"))) {
+    return(subprd_mlvl_cumul(fits, newdata))
+  }
+  is_clmm <- vapply(fits, inherits, logical(1), "clmm")
+  if (any(is_clmm)) {
+    y_nm <- extract_terms_response(formula(fits[[which(is_clmm)[1]]]))$response
   }
   prd_list <- lapply(fits, function(fit) {
+    if (inherits(fit, "projpred_mlvl_cumul")) {
+      return(subprd_mlvl_cumul(list(fit), newdata, as_array = FALSE)[[1]])
+    }
     # Basic predictions (if possible, these should be already on link scale; if
     # this is not possible, the transformation to link scale has to follow):
     if (inherits(fit, "polr")) {
@@ -1292,9 +3113,115 @@ subprd_augdat <- function(fits, newdata) {
   return(do.call(abind::abind, list(prd_list, rev.along = 0)))
 }
 
+# Linear predictors (on the link scale used by subprd_augdat()) of `polr` or
+# `multinom` fits that share the terms, the factor levels and the contrasts (as
+# the draw-wise fits of one submodel do). The model matrix for `newdata` is
+# built once, as in predict.polr() and predict.multinom(). For `polr`, the
+# linear predictors of the cumulative probabilities are zeta_j - eta, which
+# subprd_augdat() computes from the predicted category probabilities; for
+# `multinom`, they are the log odds against the first category. This function
+# computes both directly, so they differ from those of subprd_augdat() only by
+# rounding. Returns `NULL` for other cases.
+subprd_augdat_direct <- function(fits, newdata) {
+  fit_1 <- fits[[1]]
+  if (inherits(fit_1, "polr")) {
+    is_polr <- TRUE
+  } else if (inherits(fit_1, "multinom") && is.matrix(coef(fit_1))) {
+    is_polr <- FALSE
+  } else {
+    return(NULL)
+  }
+  same_cls <- function(fit) {
+    if (is_polr) {
+      inherits(fit, "polr") && !inherits(fit, "clmm")
+    } else {
+      inherits(fit, "multinom") && is.matrix(coef(fit))
+    }
+  }
+  # The terms are compared without the environment of their formula:
+  terms_noenv <- function(trms) {
+    attr(trms, ".Environment") <- NULL
+    trms
+  }
+  trms_1 <- terms_noenv(fit_1$terms)
+  if (!all(vapply(fits, function(fit) {
+    same_cls(fit) && identical(terms_noenv(fit$terms), trms_1) &&
+      identical(fit$xlevels, fit_1$xlevels) &&
+      identical(fit$contrasts, fit_1$contrasts)
+  }, logical(1)))) {
+    return(NULL)
+  }
+  trms <- delete.response(fit_1$terms)
+  mfr <- model.frame(trms, newdata, na.action = function(x) x,
+                     xlev = fit_1$xlevels)
+  if (!is.null(model.offset(mfr))) {
+    return(NULL)
+  }
+  x <- model.matrix(trms, mfr, contrasts.arg = fit_1$contrasts)
+  n <- nrow(x)
+  nprj <- length(fits)
+  if (is_polr) {
+    xint <- match("(Intercept)", colnames(x), nomatch = 0L)
+    if (xint > 0L) {
+      x <- x[, -xint, drop = FALSE]
+    }
+    if (!identical(colnames(x) %||% character(),
+                   names(coef(fit_1)) %||% character())) {
+      return(NULL)
+    }
+    zetas <- do.call(cbind, lapply(fits, "[[", "zeta"))
+    if (ncol(x) > 0) {
+      etas <- x %*% do.call(cbind, lapply(fits, coef))
+    } else {
+      etas <- matrix(0, n, nprj)
+    }
+    ncat_m1 <- nrow(zetas)
+    out <- array(NA_real_, dim = c(n, ncat_m1, nprj))
+    for (s in seq_len(nprj)) {
+      out[, , s] <- outer(-etas[, s], zetas[, s], "+")
+    }
+    cat_nms <- utils::head(fit_1$lev, -1)
+  } else {
+    coef_1 <- coef(fit_1)
+    if (!identical(colnames(x), colnames(coef_1))) {
+      return(NULL)
+    }
+    out <- array(NA_real_, dim = c(n, nrow(coef_1), nprj))
+    for (s in seq_len(nprj)) {
+      out[, , s] <- x %*% t(coef(fits[[s]]))
+    }
+    cat_nms <- rownames(coef_1)
+  }
+  dimnames(out) <- list(rownames(newdata), cat_nms, NULL)
+  return(out)
+}
+
 subprd_augdat_binom <- function(fits, newdata) {
   augprd <- subprd(fits, newdata = newdata)
   return(array(augprd, dim = c(nrow(augprd), 1L, ncol(augprd))))
+}
+
+# The terms of `object$formula` (without the response) for new data, with the
+# data-dependent bases of the training data (attribute "predvars" of
+# `object$terms`, for example the coefficients of poly()). Without them,
+# model.matrix() would compute such bases again from the new data. Returns the
+# plain terms if `object$terms` is missing or does not contain all variables.
+subfit_terms_newdata <- function(object) {
+  tt <- delete.response(terms(object$formula))
+  tt_train <- object$terms
+  if (is.null(tt_train) || is.null(attr(tt_train, "predvars"))) {
+    return(tt)
+  }
+  vars <- as.list(attr(tt, "variables"))[-1]
+  vars_train <- as.list(attr(tt_train, "variables"))[-1]
+  predvars_train <- as.list(attr(tt_train, "predvars"))[-1]
+  idx <- match(vapply(vars, deparse_combine, character(1)),
+               vapply(vars_train, deparse_combine, character(1)))
+  if (anyNA(idx)) {
+    return(tt)
+  }
+  attr(tt, "predvars") <- as.call(c(quote(list), predvars_train[idx]))
+  return(tt)
 }
 
 ## FIXME: find a way that allows us to remove this
@@ -1313,57 +3240,106 @@ predict.subfit <- function(object, newdata = NULL, ...) {
     if (is.null(beta)) {
       return(as.matrix(rep(alpha, nrow(newdata))))
     } else {
-      # TODO: In the following model.matrix() call, allow user-specified
-      # contrasts to be passed to argument `contrasts.arg`. The `contrasts.arg`
-      # default (`NULL`) uses `options("contrasts")` internally, but it might be
-      # more convenient to let users specify contrasts directly. At that
-      # occasion, contrasts should also be tested thoroughly (not done until
-      # now).
-      x <- model.matrix(delete.response(terms(object$formula)), data = newdata,
-                        xlev = object$xlvls)
-      # Need to ensure that the columns of `x` match the coefficients (note that
-      # `rownames(beta)` is the same as `colnames(object$x)`, see the tests):
-      nms_to_use <- c("(Intercept)", colnames(object$x))
-      nms_to_use <- reorder_ias(nms_to_use, colnames(x))
-      if (all(!is.na(nms_to_use)) && all(nms_to_use %in% colnames(x))) {
-        x <- x[, nms_to_use, drop = FALSE]
-      } else {
-        stop("The column names of the new model matrix don't match the ",
-             "column names of the original model matrix. Please notify the ",
-             "package maintainer.")
-      }
-      return(x %*% rbind(alpha, beta))
+      return(subfit_newdata_x(object, newdata) %*% rbind(alpha, beta))
     }
   }
 }
 
+# Model matrix (with intercept column) of a `subfit` object for new data, with
+# the columns in the order of the coefficients.
+subfit_newdata_x <- function(object, newdata) {
+  tt <- subfit_terms_newdata(object)
+  # The contrasts of the fit, not the `contrasts` attributes of `newdata` (with
+  # them, model.matrix() would warn "contrasts dropped from factor"). Also,
+  # model.matrix() warns about contrasts of variables that the terms do not
+  # have:
+  newdata <- strip_contrasts(newdata)
+  ctrs <- object$contrasts
+  if (length(ctrs) > 0) {
+    vars <- vapply(as.list(attr(tt, "variables"))[-1], deparse_combine,
+                   character(1))
+    ctrs <- ctrs[intersect(names(ctrs), vars)]
+    if (length(ctrs) == 0) {
+      ctrs <- NULL
+    }
+  }
+  x <- model.matrix(tt, data = newdata, xlev = object$xlvls,
+                    contrasts.arg = ctrs)
+  # Need to ensure that the columns of `x` match the coefficients (note that
+  # `rownames(beta)` is the same as `colnames(object$x)`, see the tests):
+  nms_to_use <- c("(Intercept)", colnames(object$x))
+  nms_to_use <- reorder_ias(nms_to_use, colnames(x))
+  if (all(!is.na(nms_to_use)) && all(nms_to_use %in% colnames(x))) {
+    x <- x[, nms_to_use, drop = FALSE]
+  } else {
+    stop("The column names of the new model matrix don't match the ",
+         "column names of the original model matrix. Please notify the ",
+         "package maintainer.")
+  }
+  return(x)
+}
+
+# The "predvars" attribute of `trms` without the response (the draw-wise fits
+# differ in the response). `NULL` if `trms` has no "predvars".
+predvars_predictors <- function(trms) {
+  pv <- attr(trms, "predvars")
+  resp <- attr(trms, "response")
+  if (is.null(pv) || is.null(resp) || resp == 0) {
+    return(pv)
+  }
+  # The first element of the call is `list`:
+  return(pv[-(resp + 1)])
+}
+
+# Predictions of several `subfit` objects with the same predictor terms (the
+# draw-wise fits of one submodel) for new data: one model matrix, one matrix
+# product. Returns `NULL` if the fits do not share their predictor terms and
+# the data-dependent bases of their training data.
+subprd_subfit_shared <- function(fits, newdata) {
+  fit_1 <- fits[[1]]
+  rhs_1 <- fit_1$formula[[3]]
+  nms_1 <- rownames(fit_1$beta)
+  pv_1 <- predvars_predictors(fit_1$terms)
+  is_shared <- all(vapply(fits, function(fit) {
+    inherits(fit, "subfit") && identical(fit$formula[[3]], rhs_1) &&
+      identical(rownames(fit$beta), nms_1) &&
+      identical(fit$xlvls, fit_1$xlvls) &&
+      identical(fit$contrasts, fit_1$contrasts) &&
+      identical(predvars_predictors(fit$terms), pv_1)
+  }, logical(1)))
+  if (!is_shared) {
+    return(NULL)
+  }
+  alphas <- vapply(fits, function(fit) as.numeric(fit$alpha), numeric(1))
+  if (is.null(fit_1$beta) || NROW(fit_1$beta) == 0) {
+    if (is.null(fit_1$beta)) {
+      # As predict.subfit() for `beta = NULL`:
+      return(matrix(alphas, nrow = nrow(newdata), ncol = length(fits),
+                    byrow = TRUE))
+    }
+    return(NULL)
+  }
+  betas <- vapply(fits, function(fit) as.numeric(fit$beta),
+                  numeric(length(nms_1)))
+  if (!is.matrix(betas)) {
+    betas <- matrix(betas, nrow = 1)
+  }
+  return(subfit_newdata_x(fit_1, newdata) %*% rbind(alphas, betas))
+}
+
+# Linear predictors of a gamm4::gamm4() fit. The population-level part
+# (parametric terms, smooths and offsets) comes from the `gam` component, so the
+# smooth bases are those of the training data. The group-level part comes from
+# repair_re.gamm4(). Without `newdata`, the training data are used.
 #' @noRd
 #' @export
 predict.gamm4 <- function(object, newdata = NULL, ...) {
   if (is.null(newdata)) {
-    newdata <- model.frame(object$mer)
+    newdata <- object$gam$model
   }
-  formula <- object$formula
-  random <- object$random
-  gamm_struct <- model.matrix_gamm4(delete.response(terms(formula)),
-                                    random = random, data = newdata)
-  ranef <- lme4::ranef(object$mer) # TODO (GAMMs): Add `, condVar = FALSE` here?
-  b <- gamm_struct$b
-  mf <- gamm_struct$mf
-
-  ## base pred only smooth and fixed effects
-  gamm_pred <- predict(object$mer, newdata = mf, re.form = NA)
-
-  ## gamm4 trick to replace dummy smooth variables with actual smooth terms
-  sn <- names(ranef)
-  tn <- names(b$reTrms$cnms)
-  ind <- seq_along(tn)
-  for (i in seq_along(tn)) { ## loop through random effect smooths
-    k <- ind[sn[i] == tn] ## which term should contain G$random[[i]]
-    ii <- (b$reTrms$Gp[k] + 1):b$reTrms$Gp[k + 1]
-    r_pred <- t(as.matrix(b$reTrms$Zt[ii, ])) %*%
-      as.matrix(c(as.matrix(ranef[[i]])))
-    gamm_pred <- gamm_pred + r_pred
+  gamm_pred <- as.vector(predict(object$gam, newdata = newdata))
+  if (!is.null(object$random)) {
+    gamm_pred <- gamm_pred + repair_re(object, newdata = newdata)
   }
   return(as.matrix(unname(gamm_pred)))
 }
@@ -1384,12 +3360,27 @@ empty_intersection <- function(x, el_nm = "new") {
 #
 # The license of lme4 version 1.1-28 is:
 # "GPL (>=2)" (see <https://CRAN.R-project.org/package=lme4>).
-mkNewReTrms_man <- function(re.form, newdata, xlevels, re, D = NULL) {
+mkNewReTrms_man <- function(re.form, newdata, xlevels, re, D = NULL,
+                            contrasts = NULL) {
   stopifnot(!is.null(newdata))
   tt <- terms(reformulas::subbars(re.form))
   rfd <- suppressWarnings(
     model.frame(tt, newdata, na.action = na.pass, xlev = xlevels)
   )
+  # The contrasts of the factors in the group-level terms of the fit (from
+  # re_contrasts()), as in lme4::mkNewReTrms():
+  for (nm in intersect(names(contrasts), names(rfd))) {
+    x <- factor(rfd[[nm]], levels = rownames(contrasts[[nm]]),
+                ordered = is.ordered(rfd[[nm]]))
+    is_new <- is.na(x) & !is.na(rfd[[nm]])
+    if (any(is_new)) {
+      stop("Factor `", nm, "` has new levels: ",
+           paste(unique(as.character(rfd[[nm]][is_new])), collapse = ", "),
+           ".")
+    }
+    contrasts(x) <- contrasts[[nm]]
+    rfd[[nm]] <- x
+  }
   ReTrms <- reformulas::mkReTrms(reformulas::findbars(re.form[[2]]), rfd)
   ns.re <- names(re)
   nRnms <- names(Rcnms <- ReTrms$cnms)
@@ -1409,6 +3400,16 @@ mkNewReTrms_man <- function(re.form, newdata, xlevels, re, D = NULL) {
     Rcnms <- ReTrms$cnms
   }
   new_levels <- lapply(ReTrms$flist, function(x) levels(factor(x)))
+  re_new <- mkNewRe_b(re, new_levels = new_levels, cnms = Rcnms)
+  Zt <- ReTrms$Zt
+  attr(Zt, "na.action") <- NULL
+  list(Zt = Zt, b = re_new, new_levels = new_levels, cnms = Rcnms)
+}
+
+# The group-level effects `re` (as from ranef()) in the order of the rows of the
+# `Zt` from mkNewReTrms_man(), with zeros for new group levels. Arguments
+# `new_levels` and `cnms` are the elements of the output of mkNewReTrms_man().
+mkNewRe_b <- function(re, new_levels, cnms) {
   re_x <- Map(
     function(r, n) {
       ("lme4" %:::% "levelfun")(r, n, allow.new.levels = TRUE)
@@ -1425,10 +3426,9 @@ mkNewReTrms_man <- function(re.form, newdata, xlevels, re, D = NULL) {
     }
     t(re_x[[rname]][, cnms])
   }
-  re_new <- unlist(Map(get_re, nRnms, Rcnms))
-  Zt <- ReTrms$Zt
-  attr(Zt, "na.action") <- attr(re_new, "na.action") <- NULL
-  list(Zt = Zt, b = re_new)
+  re_new <- unlist(Map(get_re, names(cnms), cnms))
+  attr(re_new, "na.action") <- NULL
+  return(re_new)
 }
 
 repair_re <- function(object, newdata) {
@@ -1619,6 +3619,120 @@ repair_re.clmm <- function(object, newdata) {
   return(-drop(as(ranefs_prep$b %*% ranefs_prep$Zt, "matrix")))
 }
 
+# For objects of class `gamm4`, the following repair_re() method works as
+# repair_re.clmm(): it re-uses the estimated group-level effects for existing
+# group levels and draws those for new group levels from a (multivariate)
+# Gaussian distribution, and option `projpred.mlvl_pred_new` determines whether
+# existing group levels are also considered as new group levels. It uses only
+# the grouping variables of `object$random`, because the lme4 fit `object$mer`
+# also has one grouping variable for each penalized smooth term.
+#
+# License/copyright notice: repair_re.gamm4() is inspired by and uses code
+# snippets from lme4:::predict.merMod() from lme4 version 1.1-28 (see
+# <https://CRAN.R-project.org/package=lme4>). See the `LICENSE` file in
+# projpred's root directory for details.
+#
+# The copyright statement for lme4 version 1.1-28 is:
+# Copyright (C) 2003-2022 The LME4 Authors (see
+# <https://CRAN.R-project.org/package=lme4>).
+#
+# The license of lme4 version 1.1-28 is:
+# "GPL (>=2)" (see <https://CRAN.R-project.org/package=lme4>).
+#' @noRd
+#' @export
+repair_re.gamm4 <- function(object, newdata) {
+  stopifnot(!is.null(newdata))
+  vnms <- gamm4_re_vnms(object)
+  ranef_tmp <- lme4::ranef(object$mer, condVar = FALSE)[vnms]
+  prep <- gamm4_re_prep(object, newdata = newdata, ranef_tmp = ranef_tmp)
+  b <- gamm4_re_b(object, prep = prep, ranef_tmp = ranef_tmp)
+  return(drop(as(b %*% prep$Zt, "matrix")))
+}
+
+# The grouping variables of the group-level terms of a `gamm4` fit.
+gamm4_re_vnms <- function(object) {
+  vnms <- unique(vapply(reformulas::findbars(object$random), function(bar) {
+    deparse_combine(bar[[3]])
+  }, character(1)))
+  if (any(grepl("[/:]", vnms))) {
+    stop("The `/` and `:` syntax for grouping variables is currently not ",
+         "supported. Please write out (i.e., create corresponding columns in ",
+         "the dataset manually and then adapt the model formula) interaction ",
+         "terms.")
+  }
+  return(vnms)
+}
+
+# The parts of repair_re.gamm4() that depend only on `newdata`, the group-level
+# formula and the group levels of the fit: the existing and new group levels
+# and the random-effects design `Zt` for `newdata`. `ranef_tmp` holds the
+# group-level effects of `object` for the grouping variables from
+# gamm4_re_vnms(). Fits with the same group-level formula, group levels and
+# factor levels of the `gam` component (`object$gam$xlevels`) give the same
+# output.
+gamm4_re_prep <- function(object, newdata, ranef_tmp) {
+  re_fml <- object$random
+  vnms <- names(ranef_tmp)
+  vnms_miss <- setdiff(vnms, names(newdata))
+  if (length(vnms_miss) > 0) {
+    stop("Could not find column `", vnms_miss[1], "` in `newdata`.")
+  }
+  lvls_list <- lapply(setNames(nm = vnms), function(vnm) {
+    from_fit <- rownames(ranef_tmp[[vnm]])
+    from_new <- as.character(unique(newdata[[vnm]]))
+    list(comb = union(from_fit, from_new),
+         exist = intersect(from_new, from_fit),
+         new = from_new)
+  })
+  # In case of duplicated levels across group variables, later code would have
+  # to be adapted:
+  if (getOption("projpred.mlvl_pred_new", FALSE)) {
+    el_nm_gamm <- "new"
+  } else {
+    el_nm_gamm <- "comb"
+  }
+  if (length(lvls_list) >= 2 &&
+      !all(utils::combn(lvls_list, 2, empty_intersection,
+                        el_nm = el_nm_gamm))) {
+    stop("Currently, projpred requires all variables with group-level effects ",
+         "to have disjoint level sets.")
+  }
+  ranefs_prep <- mkNewReTrms_man(re.form = re_fml,
+                                 newdata = newdata,
+                                 xlevels = c(lapply(lvls_list, "[[", "comb"),
+                                             object$gam$xlevels),
+                                 re = ranef_tmp,
+                                 contrasts = object$re_contrasts)
+  return(list(lvls_list = lvls_list, Zt = ranefs_prep$Zt,
+              new_levels = ranefs_prep$new_levels, cnms = ranefs_prep$cnms))
+}
+
+# The group-level effects of `object` in the order of the rows of `prep$Zt`
+# (`prep` from gamm4_re_prep()), with draws from the fitted (multivariate)
+# Gaussian distribution for new group levels.
+gamm4_re_b <- function(object, prep, ranef_tmp) {
+  b <- mkNewRe_b(ranef_tmp, new_levels = prep$new_levels, cnms = prep$cnms)
+  names(b) <- rownames(prep$Zt)
+
+  VarCorr_tmp <- lme4::VarCorr(object$mer)
+  for (vnm in names(ranef_tmp)) {
+    lvls_new <- prep$lvls_list[[vnm]]$new
+    if (!getOption("projpred.mlvl_pred_new", FALSE)) {
+      lvls_exist <- prep$lvls_list[[vnm]]$exist
+      lvls_new <- setdiff(lvls_new, lvls_exist)
+    }
+    if (length(lvls_new) > 0) {
+      b[names(b) %in% lvls_new] <- t(mvtnorm::rmvnorm(
+        n = length(lvls_new),
+        # Add `[, , drop = FALSE]` to drop attributes:
+        sigma = VarCorr_tmp[[vnm]][, , drop = FALSE],
+        checkSymmetry = FALSE
+      ))
+    }
+  }
+  return(b)
+}
+
 # For objects of class `mmblogit`, the following repair_re() method will re-use
 # the estimated random effects for existing group levels and will draw the
 # random effects for new group levels from a (multivariate) Gaussian
@@ -1669,9 +3783,10 @@ repair_re.mmblogit <- function(object, newdata) {
         stop("It seems like you fitted a model with a nested group-level ",
              "term. Currently, these are not supported.")
       }
-      # The number of "random slopes", including the intercept (the intercept is
-      # the reason for `+ 1L`):
-      ncoefs <- length(all.vars(obj_rand$formula)) + 1L
+      # The number of group-level coefficients per latent category (the columns
+      # of the group-level model matrix, for example K - 1 for a factor with K
+      # levels):
+      ncoefs <- ncol(object$VarCov[[VarCov_idx]]) %/% nlats
       # The coercion itself:
       ranef_i <- matrix(
         object$random.effects[[grp_idx]],
@@ -1728,7 +3843,8 @@ repair_re.mmblogit <- function(object, newdata) {
                                  xlevels = c(lapply(lvls_list, "[[", "comb"),
                                              object$xlevels),
                                  re = ranef_tmp,
-                                 D = object$D)
+                                 D = object$D,
+                                 contrasts = object$re_contrasts)
   names(ranefs_prep$b) <- rownames(ranefs_prep$Zt)
 
   VarCorr_tmp <- object$VarCov

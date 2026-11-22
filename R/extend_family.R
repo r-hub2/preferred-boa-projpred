@@ -16,7 +16,9 @@
 #' @param family An object of class `family`.
 #' @param latent A single logical value indicating whether to use the latent
 #'   projection (`TRUE`) or not (`FALSE`). Note that setting `latent = TRUE`
-#'   causes all arguments starting with `augdat_` to be ignored.
+#'   causes all arguments starting with `augdat_` to be ignored. The latent
+#'   projection does not support the [brms::categorical()] family; use the
+#'   augmented-data projection for it.
 #' @param latent_y_unqs Only relevant for a latent projection where the original
 #'   response space has finite support (i.e., the original response values may
 #'   be regarded as categories), in which case this needs to be the character
@@ -53,6 +55,14 @@
 #'   "posterior predictive distribution"), \pkg{projpred} currently only uses it
 #'   in [proj_predict()], i.e., for sampling from what would better be termed
 #'   posterior-projection predictive distribution (PPPD).
+#' @param latent_epred Only relevant for the latent projection. Must be `NULL`
+#'   if `family$cats` is not `NULL` (after taking `latent_y_unqs` into
+#'   account). If not `NULL`, this needs to be the function computing the
+#'   response-scale expected values from the output of `latent_ilink`. It is
+#'   needed if the output of `latent_ilink` is not the expected value, for
+#'   example the `meanlog` parameter of a log-normal distribution. If `NULL`
+#'   (the default), the output of `latent_ilink` is used as the expected value.
+#'   See also section "Latent projection" below.
 #' @param augdat_y_unqs Only relevant for augmented-data projection, in which
 #'   case this needs to be the character vector of unique response values (which
 #'   will be assigned to `family$cats` internally) or may be left at `NULL` if
@@ -227,7 +237,26 @@
 #' posterior(-projection) predictive distributions for the \eqn{N} observations
 #' from its inputs.
 #'
-#' If the bodies of these three functions involve parameter draws from the
+#' The function supplied to argument `latent_epred` needs to have the prototype
+#' ```{r, eval = FALSE}
+#' latent_epred(ilpreds, dis, cl_ref, wdraws_ref = rep(1, length(cl_ref)))
+#' ```
+#' where the arguments accept the same input as the arguments of the same name
+#' of `latent_ll_oscale`. For a submodel, `dis` contains the projected draws of
+#' the dispersion parameter; for the reference model, it is `<refmodel>$dis`
+#' (see argument `dis` of [init_refmodel()]). If `<refmodel>$dis` consists of
+#' only `NA`s, a `latent_epred` function that uses `dis` gives `NA`s for the
+#' reference model and the submodels. The return value of `latent_epred` needs
+#' to be an
+#' \eqn{S \times N}{S x N} matrix containing the response-scale expected
+#' values. \pkg{projpred} uses them for the response-scale predictions of
+#' [proj_linpred()] (with `transform = TRUE`), [proj_epred()], and
+#' [predict.refmodel()] (with `type = "response"`), and for the
+#' response-scale performance statistics `"mse"`, `"rmse"`, and `"R2"`. The
+#' functions `latent_ll_oscale` and `latent_ppd_oscale` still get the output of
+#' `latent_ilink`.
+#'
+#' If the bodies of these functions involve parameter draws from the
 #' reference model which have not been projected (e.g., for `latent_ilink`, the
 #' thresholds in an ordinal model), [cl_agg()] is provided as a helper function
 #' for aggregating these reference model draws in the same way as the draws have
@@ -242,6 +271,26 @@
 #' reference model's posterior draws: In case of [cv_varsel()] with `cv_method =
 #' "kfold"`, these weights may refer to one of the \eqn{K} reference model
 #' refits (but in that case, they are constant anyway).
+#'
+#' In [cv_varsel()] with `cv_method = "kfold"`, the reference model objects of
+#' the \eqn{K} folds are created by the `cvrefbuilder` function (see
+#' [init_refmodel()]). The default `cvrefbuilder` functions of
+#' [get_refmodel.stanreg()] and [brms::get_refmodel.brmsfit()] pass
+#' user-supplied functions `latent_ilink`, `latent_ll_oscale`,
+#' `latent_ppd_oscale`, and `latent_epred` (and a user-supplied argument `dis`,
+#' see [init_refmodel()]) unchanged to the fold-wise reference model objects. If
+#' these functions take reference model draws from their enclosing environment
+#' (e.g., draws of a shape parameter), or if `dis` contains such draws, then the
+#' folds use the draws from the full-data fit. To use the draws from the
+#' fold-wise refits, define the functions (and compute `dis`) inside a function
+#' that takes the fitted model object as its argument and calls
+#' [get_refmodel()]. Then define a function that calls this outer function with
+#' the fold-wise refit. For an \pkg{rstanarm} reference model, pass this
+#' function as argument `cvrefbuilder` of [get_refmodel.stanreg()]. Method
+#' [brms::get_refmodel.brmsfit()] does not accept a `cvrefbuilder` argument;
+#' for a \pkg{brms} reference model, set element `cvrefbuilder` of the
+#' reference model object to this function instead. The latent-projection
+#' vignette shows an example.
 #'
 #' If `family$cats` is not `NULL` (after taking `latent_y_unqs` into account),
 #' then the response vector resulting from `extract_model_data` (see
@@ -261,6 +310,7 @@ extend_family <- function(family,
                           latent_ilink = NULL,
                           latent_ll_oscale = NULL,
                           latent_ppd_oscale = NULL,
+                          latent_epred = NULL,
                           augdat_y_unqs = NULL,
                           augdat_link = NULL,
                           augdat_ilink = NULL,
@@ -270,6 +320,28 @@ extend_family <- function(family,
   if (has_family_extras(family)) {
     # If the family was already extended using this function, then return as-is:
     return(family)
+  }
+  # Unsupported brms families:
+  # * families with `trials()` other than binomial(). projpred cannot use more
+  #   than one trial per observation for them, and with one trial they reduce
+  #   to the Bernoulli family;
+  # * families with one linear predictor per non-reference response category,
+  #   other than categorical().
+  # Check them before `latent = TRUE` replaces the family with gaussian():
+  if (isTRUE(family$family %in% c("beta_binomial", "zero_inflated_binomial",
+                                  "zero_inflated_beta_binomial",
+                                  "multinomial", "dirichlet", "dirichlet2",
+                                  "dirichlet_multinomial", "logistic_normal"))) {
+    stop("Currently, projpred does not support the brms family `",
+         family$family, "()`.", call. = FALSE)
+  }
+  # The latent projection needs one linear predictor per observation, but
+  # brms::categorical() has one per non-reference response category:
+  if (latent && isTRUE(family$family == "categorical")) {
+    stop("Currently, projpred does not support the latent projection for the ",
+         "brms family `categorical()`, which has one linear predictor per ",
+         "non-reference response category. Use `latent = FALSE` (the ",
+         "augmented-data projection) instead.", call. = FALSE)
   }
   if (latent) {
     family_oscale_tmp <- family$family
@@ -310,7 +382,7 @@ extend_family <- function(family,
             return(ilpreds)
           }
         } else {
-          if (family$family_oscale != "poisson") {
+          if (!family$family_oscale %in% fams_linkinv_mean()) {
             message("Defining `latent_ilink` as a function which calls ",
                     "`family$linkinv`, but there is no guarantee that this ",
                     "will work for all families. If relying on ",
@@ -376,9 +448,28 @@ extend_family <- function(family,
         stop("Please add argument `dis_resamp` to the `latent_ppd_oscale` ",
              "function.")
       }
+      if (!is.null(latent_epred)) {
+        if (!is.null(family$cats)) {
+          stop("Argument `latent_epred` cannot be used if `family$cats` is ",
+               "not `NULL`.")
+        }
+        if (!is.function(latent_epred)) {
+          stop("Argument `latent_epred` needs to be a function or `NULL`.")
+        }
+        args_epred <- c("dis", "cl_ref", "wdraws_ref")
+        args_missing <- setdiff(args_epred,
+                                methods::formalArgs(latent_epred))
+        if (!"..." %in% methods::formalArgs(latent_epred) &&
+            length(args_missing) > 0) {
+          stop("Please add argument(s) ",
+               paste0("`", args_missing, "`", collapse = ", "),
+               " to the `latent_epred` function.")
+        }
+      }
       family$latent_ilink <- latent_ilink
       family$latent_ll_oscale <- latent_ll_oscale
       family$latent_ppd_oscale <- latent_ppd_oscale
+      family$latent_epred <- latent_epred
     }
     family$for_latent <- latent
     family$for_augdat <- FALSE
@@ -420,24 +511,22 @@ extend_family <- function(family,
       } else if (length(w_obs) != n_obs) {
         stop("Argument `w_obs` needs to be of length 0, 1, or `n_obs`.")
       }
-      return(do.call(rbind, lapply(seq_len(n_obs), function(i_obs) {
-        do.call(c, lapply(seq_len(n_prjdraws), function(i_prjdraws) {
-          prbs_ref <- mu_ref_arr[i_obs, , i_prjdraws]
-          prbs_sub <- mu_sub_arr[i_obs, , i_prjdraws]
-          # Assign some nonzero value to have a finite log() value (the specific
-          # value doesn't matter for `prbs_ref` because of the multiplication
-          # with zero):
-          prbs_ref[prbs_ref == 0] <- .Machine$double.eps
-          # Assign some nonzero value to have a finite log() value (for
-          # `prbs_sub`, the specific value matters, in contrast to `prbs_ref`):
-          prbs_sub[prbs_sub == 0] <- .Machine$double.eps
-          # In analogy to `extend_family(binomial())$ce()`,
-          # `extend_family(poisson())$ce()`, and
-          # `extend_family(gaussian())$ce()`, multiply by the observation
-          # weight:
-          return(w_obs[i_obs] * (-sum(prbs_ref * log(prbs_sub))))
-        }))
-      })))
+      # Assign some nonzero value to have a finite log() value (the specific
+      # value doesn't matter for `mu_ref_arr` because of the multiplication with
+      # zero):
+      mu_ref_arr[mu_ref_arr == 0] <- .Machine$double.eps
+      # Assign some nonzero value to have a finite log() value (for
+      # `mu_sub_arr`, the specific value matters, in contrast to `mu_ref_arr`):
+      mu_sub_arr[mu_sub_arr == 0] <- .Machine$double.eps
+      # Sum over the response categories (the second dimension) for each
+      # observation and draw: rowSums() of the observations x draws x
+      # categories array:
+      ce_unw <- -rowSums(aperm(mu_ref_arr * log(mu_sub_arr), c(1, 3, 2)),
+                         dims = 2)
+      # In analogy to `extend_family(binomial())$ce()`,
+      # `extend_family(poisson())$ce()`, and `extend_family(gaussian())$ce()`,
+      # multiply by the observation weight:
+      return(matrix(w_obs * ce_unw, nrow = n_obs, ncol = n_prjdraws))
     }
     family$ce <- function(pref, data, psub) {
       ce_sums <- colSums(
@@ -453,9 +542,17 @@ extend_family <- function(family,
     family$predvar <- function(mu, dis, wdraws = 1) {
       return(rep(NA, NROW(mu)))
     }
-    family$ll_fun <- function(mu, dis = NULL, y, weights = 1) {
+    fam_nm_augdat <- family$family
+    link_nm_augdat <- family$link
+    family$ll_fun <- function(mu, dis = NULL, y, weights = 1, eta = NULL) {
       mu_arr <- augmat2arr(mu)
-      return(ll_cats(mu_arr, y = y, wobs = weights))
+      ll <- ll_cats(mu_arr, y = y, wobs = weights)
+      if (!is.null(eta)) {
+        ll <- ll_eta_augdat(ll, mu_arr = mu_arr, eta = eta, y = y,
+                            wobs = weights, fam_nm = fam_nm_augdat,
+                            link_nm = link_nm_augdat)
+      }
+      return(ll)
     }
     family$ppd <- function(mu, dis, weights = 1) {
       mu_arr <- augmat2arr(augvec2augmat(mu))
@@ -466,6 +563,65 @@ extend_family <- function(family,
   }
   family$is_extended <- TRUE
   return(family)
+}
+
+# The log-likelihood from the linear predictor `eta` (an N x S matrix with the
+# dimensions of `mu`, offsets included). binomial()$linkinv() gives 2.2e-16 and
+# 1 - 2.2e-16 for |eta| > 30, and log(1 - mu) loses digits for smaller positive
+# `eta` too (1 - mu has a relative rounding error of about 1.1e-16 * exp(eta)),
+# so the binomial (logit) function computes all entries from `eta`; it uses
+# `mu` only for the entries where `eta` is `NA`, and for the dimnames.
+# poisson()$linkinv() gives at least 2.2e-16 (eta < -36), and log(mu) is
+# accurate above that, so the Poisson (log) function computes only the clamped
+# entries of `ll` again. `y` and `weights` are recycled along the columns of
+# `eta`, as in dbinom() and dpois(). The product with a zero count or a zero
+# weight is 0, also for an infinite `eta`.
+ll_eta_binom_logit <- function(mu, eta, y, weights) {
+  ll_check_eta_dim(eta, mu)
+  y <- as.vector(y)
+  weights <- as.vector(weights)
+  # dbinom(y, weights, 0.5, log = TRUE) - weights * log(0.5) is the log binomial
+  # coefficient (computed once per observation if `y` and `weights` have length
+  # N), with the handling of invalid `y` of dbinom() (-Inf and a warning for a
+  # non-integer `y`; lchoose() would give a finite value):
+  ll <- (dbinom(y, weights, 0.5, log = TRUE) - weights * log(0.5)) +
+    ll_xlogp(y, plogis(eta, log.p = TRUE)) +
+    ll_xlogp(weights - y, plogis(-eta, log.p = TRUE))
+  if (anyNA(eta)) {
+    na_idx <- is.na(eta)
+    ll[na_idx] <- dbinom(y, weights, mu, log = TRUE)[na_idx]
+  }
+  dimnames(ll) <- dimnames(mu)
+  return(ll)
+}
+ll_clamped_poiss_log <- function(ll, eta, y, weights) {
+  ll_check_eta_dim(eta, ll)
+  idx <- which(exp(eta) < .Machine$double.eps)
+  if (length(idx) == 0) {
+    return(ll)
+  }
+  y <- matrix(y, nrow = nrow(ll), ncol = ncol(ll))[idx]
+  w <- matrix(weights, nrow = nrow(ll), ncol = ncol(ll))[idx]
+  e <- eta[idx]
+  # dpois(y, 1, log = TRUE) + 1 is -lgamma(y + 1), with the handling of invalid
+  # `y` of dpois():
+  ll[idx] <- ll_xlogp(w, dpois(y, 1, log = TRUE) + 1 + ll_xlogp(y, e) - exp(e))
+  return(ll)
+}
+# `x` is `mu` or `ll` (a vector counts as a one-column matrix):
+ll_check_eta_dim <- function(eta, x) {
+  if (!is.matrix(eta) || !identical(dim(eta), dim(as.matrix(x)))) {
+    stop("Unexpected dimensions of `eta`. Please notify the package ",
+         "maintainer.")
+  }
+  return(invisible(TRUE))
+}
+# k * logp, with 0 where `k` is 0 (`k` is recycled to the length of the
+# product):
+ll_xlogp <- function(k, logp) {
+  out <- k * logp
+  out[rep(k == 0, length.out = length(out))] <- 0
+  out
 }
 
 extend_family_binomial <- function(family) {
@@ -489,8 +645,11 @@ extend_family_binomial <- function(family) {
   predvar_na <- function(mu, dis, wdraws = 1) {
     rep(NA, NROW(mu))
   }
-  ll_binom <- function(mu, dis, y, weights = 1) {
+  ll_binom <- function(mu, dis, y, weights = 1, eta = NULL) {
     y <- as.matrix(y)
+    if (!is.null(eta) && family$link == "logit") {
+      return(ll_eta_binom_logit(mu = mu, eta = eta, y = y, weights = weights))
+    }
     dbinom(y, weights, mu, log = TRUE)
   }
   dev_binom <- function(mu, y, weights = 1, dis = NULL) {
@@ -547,6 +706,7 @@ extend_family_binomial <- function(family) {
   family$ce <- ce_binom
   family$dis_fun <- dis_na
   family$predvar <- predvar_na
+  family <- add_predvar_mix(family, predvar_mix_na, uses_moments = FALSE)
   family$ll_fun <- ll_binom
   family$deviance <- dev_binom
   family$ppd <- ppd_binom
@@ -575,9 +735,13 @@ extend_family_poisson <- function(family) {
   predvar_na <- function(mu, dis, wdraws = 1) {
     rep(NA, NROW(mu))
   }
-  ll_poiss <- function(mu, dis, y, weights = 1) {
+  ll_poiss <- function(mu, dis, y, weights = 1, eta = NULL) {
     y <- as.matrix(y)
-    weights * dpois(y, mu, log = TRUE)
+    ll <- weights * dpois(y, mu, log = TRUE)
+    if (!is.null(eta) && family$link == "log") {
+      ll <- ll_clamped_poiss_log(ll, eta = eta, y = y, weights = weights)
+    }
+    ll
   }
   dev_poiss <- function(mu, y, weights = 1, dis = NULL) {
     if (NCOL(y) < NCOL(mu)) {
@@ -593,11 +757,56 @@ extend_family_poisson <- function(family) {
   family$ce <- ce_poiss
   family$dis_fun <- dis_na
   family$predvar <- predvar_na
+  family <- add_predvar_mix(family, predvar_mix_na, uses_moments = FALSE)
   family$ll_fun <- ll_poiss
   family$deviance <- dev_poiss
   family$ppd <- ppd_poiss
 
   return(family)
+}
+
+# For each observation (row of `mu`), the weighted variance of `mu` across the
+# draws (columns of `mu`), with weights `wdraws` (the caller normalizes them to
+# sum to 1). Vectorized form of
+# `sum(wdraws * (mu[i, ] - weighted.mean(mu[i, ], wdraws))^2)`.
+rowvar_wdraws <- function(mu, wdraws) {
+  mu_mean <- drop(mu %*% wdraws) / sum(wdraws)
+  return(drop(((mu - mu_mean)^2) %*% wdraws))
+}
+
+# Predictive variances of several clusters at once, from their parts.
+# `family$predvar_mix(dis2, mu_var, nobs)` gives the observations x clusters
+# matrix of `family$predvar()` of all clusters, from the weighted means `dis2`
+# of the squared dispersion parameter draws in each cluster and the weighted
+# variances `mu_var` of `mu` across the draws of each cluster (an observations
+# x clusters matrix, or `0` if each cluster has one draw and all values of `mu`
+# are finite).
+# Attribute "predvar" of `family$predvar_mix` is the `family$predvar` that it
+# belongs to (see add_predvar_mix()). Attribute "uses_moments" is `FALSE` if
+# `family$predvar_mix` uses only `length(dis2)`, not the values of `dis2` and
+# `mu_var`. Then get_p_clust() does not compute these values and can give `NA`
+# in them.
+
+# Adds `predvar_mix` to `family`, for the current `family$predvar`.
+add_predvar_mix <- function(family, predvar_mix, uses_moments = TRUE) {
+  family$predvar_mix <- structure(predvar_mix, predvar = family$predvar,
+                                  uses_moments = uses_moments)
+  return(family)
+}
+
+# `predvar_mix` of the families whose predvar() gives `NA`.
+predvar_mix_na <- function(dis2, mu_var, nobs) {
+  matrix(NA, nrow = nobs, ncol = length(dis2))
+}
+
+# The predictive variances `dis_part[j] + mu_var[, j]` (the sum in the same
+# order as in predvar_gauss() and predvar_student_t()).
+predvar_mix_add <- function(dis_part, mu_var, nobs) {
+  out <- matrix(dis_part, nrow = nobs, ncol = length(dis_part), byrow = TRUE)
+  if (!identical(mu_var, 0)) {
+    out <- out + mu_var
+  }
+  out
 }
 
 extend_family_gaussian <- function(family) {
@@ -615,12 +824,14 @@ extend_family_gaussian <- function(family) {
   }
   predvar_gauss <- function(mu, dis, wdraws = 1) {
     wdraws <- wdraws / sum(wdraws)
-    mu_var <- do.call(rbind, lapply(seq_len(nrow(mu)), function(i) {
-      sum(wdraws * (mu[i, ] - weighted.mean(mu[i, ], wdraws))^2)
-    }))
+    mu_var <- rowvar_wdraws(mu, wdraws)
     as.vector(sum(wdraws * dis^2) + mu_var)
   }
-  ll_gauss <- function(mu, dis, y, weights = 1) {
+  # predvar_gauss() of several clusters at once (see add_predvar_mix()):
+  predvar_mix_gauss <- function(dis2, mu_var, nobs) {
+    predvar_mix_add(dis2, mu_var, nobs)
+  }
+  ll_gauss <- function(mu, dis, y, weights = 1, eta = NULL) {
     y <- as.matrix(y)
     dis <- matrix(rep(dis, each = length(y)), ncol = NCOL(mu))
     weights * dnorm(y, mu, dis, log = TRUE)
@@ -644,6 +855,7 @@ extend_family_gaussian <- function(family) {
   family$ce <- ce_gauss
   family$dis_fun <- dis_gauss
   family$predvar <- predvar_gauss
+  family <- add_predvar_mix(family, predvar_mix_gauss)
   family$ll_fun <- ll_gauss
   family$deviance <- dev_gauss
   family$ppd <- ppd_gauss
@@ -674,7 +886,7 @@ extend_family_gamma <- function(family) {
   predvar_gamma <- function(mu, dis, wdraws = 1) {
     stop("Family Gamma not implemented yet.")
   }
-  ll_gamma <- function(mu, dis, y, weights = 1) {
+  ll_gamma <- function(mu, dis, y, weights = 1, eta = NULL) {
     y <- as.matrix(y)
     dis <- matrix(rep(dis, each = length(y)), ncol = NCOL(mu))
     weights * dgamma(y, dis, dis / matrix(mu), log = TRUE)
@@ -718,12 +930,14 @@ extend_family_student_t <- function(family) {
   }
   predvar_student_t <- function(mu, dis, wdraws = 1) {
     wdraws <- wdraws / sum(wdraws)
-    mu_var <- do.call(rbind, lapply(seq_len(nrow(mu)), function(i) {
-      sum(wdraws * (mu[i, ] - weighted.mean(mu[i, ], wdraws))^2)
-    }))
+    mu_var <- rowvar_wdraws(mu, wdraws)
     as.vector(family$nu / (family$nu - 2) * sum(wdraws * dis^2) + mu_var)
   }
-  ll_student_t <- function(mu, dis, y, weights = 1) {
+  # predvar_student_t() of several clusters at once (see add_predvar_mix()):
+  predvar_mix_student_t <- function(dis2, mu_var, nobs) {
+    predvar_mix_add(family$nu / (family$nu - 2) * dis2, mu_var, nobs)
+  }
+  ll_student_t <- function(mu, dis, y, weights = 1, eta = NULL) {
     y <- as.matrix(y)
     dis <- matrix(rep(dis, each = length(y)), ncol = NCOL(mu))
     weights * (dt((y - mu) / dis, family$nu, log = TRUE) - log(dis))
@@ -748,6 +962,7 @@ extend_family_student_t <- function(family) {
   family$ce <- ce_student_t
   family$dis_fun <- dis_student_t
   family$predvar <- predvar_student_t
+  family <- add_predvar_mix(family, predvar_mix_student_t)
   family$ll_fun <- ll_student_t
   family$deviance <- dev_student_t
   family$ppd <- ppd_student_t
@@ -765,4 +980,13 @@ has_dispersion <- function(family) {
 # to extend_family()):
 has_family_extras <- function(family) {
   return(isTRUE(family$is_extended))
+}
+
+# Names of the original response families (rstanarm, brms and stats) whose
+# `linkinv` gives the mean of the response, so that the latent projection's
+# internal default for `latent_ilink` is correct for them without a message:
+fams_linkinv_mean <- function() {
+  return(c("poisson", "neg_binomial_2", "negbinomial", "negbinomial2",
+           "geometric", "Gamma", "gamma", "inverse.gaussian", "Beta",
+           "weibull", "exponential", "frechet", "skew_normal", "exgaussian"))
 }

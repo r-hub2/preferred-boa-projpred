@@ -1,7 +1,5 @@
 # proj_epred() -------------------------------------------------------------
 
-context("proj_epred()")
-
 ## object ------------------------------------------------------------------
 
 test_that("pe: `object` of class `projection` works", {
@@ -139,10 +137,6 @@ test_that("pe: `newdata` works", {
     }
     dat_crr <- get_dat(tstsetup)
     for (nobsv_crr in nobsv_tst) {
-      if (args_prj[[tstsetup]]$mod_nm == "gamm") {
-        # TODO (GAMMs): Fix this.
-        next
-      }
       if (!is.null(
         refmods[[args_prj[[tstsetup]]$tstsetup_ref]]$family$cats
       )) {
@@ -215,7 +209,6 @@ test_that(paste(
   "pe: `return_draws_matrix` causes a conversion of the output type"
 ), {
   skip_if_not(run_prj)
-  skip_if_not_installed("posterior")
   for (tstsetup in names(prjs)) {
     ndr_ncl <- ndr_ncl_dtls(args_prj[[tstsetup]])
     pe_orig <- pes[[tstsetup]]

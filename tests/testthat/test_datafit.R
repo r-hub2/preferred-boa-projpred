@@ -1,5 +1,3 @@
-context("datafit")
-
 # Setup -------------------------------------------------------------------
 
 # Note: Since PR #351, offsets are not supported anymore for `datafit`s. Here,
@@ -194,6 +192,7 @@ if (run_vs) {
 ## Reference model --------------------------------------------------------
 
 test_that("init_refmodel(): `object` of class `datafit` works", {
+  skip_if_no_setups(datafits)
   for (tstsetup in names(datafits)) {
     tstsetup_fit <- args_datafit[[tstsetup]]$tstsetup_fit
     with_spclformul_crr <- grepl("\\.spclformul", tstsetup)
@@ -222,6 +221,7 @@ test_that("init_refmodel(): `object` of class `datafit` works", {
 })
 
 test_that("predict.refmodel(): `object` of class `datafit` fails", {
+  skip_if_no_setups(datafits)
   for (tstsetup in names(datafits)) {
     expect_error(
       predict(datafits[[tstsetup]], newdata = dat),
@@ -430,12 +430,12 @@ test_that(paste(
               info_str = paste(tstsetup, "with_args", sep = "__"))
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pl_with_args))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pl_with_args))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -471,12 +471,12 @@ test_that(paste(
               info_str = paste(tstsetup, "with_args", sep = "__"))
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pp_with_args))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pp_with_args))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -485,6 +485,7 @@ test_that(paste(
 ## summary.vsel() ---------------------------------------------------------
 
 test_that("summary.vsel(): `object` of class `datafit` fails", {
+  skip_if_no_setups(datafits)
   for (tstsetup in names(datafits)) {
     expect_error(
       summary.vsel(datafits[[tstsetup]]),
@@ -537,12 +538,12 @@ test_that(paste(
     )
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(smmry, digits = 6)
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(smmry, digits = 6)
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -580,12 +581,12 @@ test_that(paste(
     )
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(smmry, digits = 6)
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(smmry, digits = 6)
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -606,9 +607,7 @@ test_that(paste(
   # This test sometimes behaves inpredictably when run in `R CMD check`, so skip
   # it on CRAN:
   skip_on_cran()
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
+  withr::local_preserve_seed()
   suppressWarnings(RNGversion("3.5.0"))
   set.seed(1235)
   n <- 100
@@ -754,5 +753,33 @@ test_that(paste(
     expect_identical(ind, predictor_ranking_lasso, info = as.character(i))
   }
   RNGversion(getRversion())
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
+})
+
+test_that("a long search term keeps its text in the ranking", {
+  withr::local_seed(5309)
+  n <- 50
+  nms <- sprintf("predictor_with_a_long_name_%02d", 1:30)
+  dat <- as.data.frame(matrix(rnorm(n * 30), n, 30,
+                              dimnames = list(NULL, nms)))
+  dat$z <- rnorm(n)
+  dat$y <- dat$z + rnorm(n)
+  extract_model_data <- function(object, newdata, wrhs = NULL, orhs = NULL,
+                                 extract_y = TRUE) {
+    y_wobs_offs(newdata = newdata, wrhs = wrhs, orhs = orhs,
+                resp_form = if (extract_y) ~ y else NULL)
+  }
+  fml <- as.formula(paste("y ~ z +", paste(nms, collapse = " + ")))
+  refm <- suppressWarnings(init_refmodel(
+    object = NULL, data = dat, formula = fml, family = gaussian(),
+    extract_model_data = extract_model_data
+  ))
+  # A search term of 957 characters:
+  long_term <- paste(nms, collapse = " + ")
+  for (use_crossprod in c(TRUE, FALSE)) {
+    withr::local_options(projpred.search_gauss_crossprod = use_crossprod)
+    vs <- suppressWarnings(varsel(refm, search_terms = c("1", "z", long_term),
+                                  nterms_max = 31, verbose = FALSE))
+    expect_identical(ranking(vs)$fulldata, c("z", long_term),
+                     info = as.character(use_crossprod))
+  }
 })

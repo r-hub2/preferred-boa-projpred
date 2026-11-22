@@ -1,7 +1,5 @@
 # varsel() ----------------------------------------------------------------
 
-context("varsel()")
-
 test_that(paste(
   "`object` of class `refmodel` and arguments `method`, `nterms_max`,",
   "`nclusters`, and `nclusters_pred` work"
@@ -34,6 +32,7 @@ test_that("invalid `object` fails", {
 })
 
 test_that("invalid `method` fails", {
+  skip_if_no_setups(refmods)
   for (tstsetup in names(refmods)) {
     expect_error(varsel(refmods[[tstsetup]], method = "k-fold"),
                  "^Unexpected value for argument `method`\\.$",
@@ -53,6 +52,123 @@ test_that("invalid `method` fails", {
                    info = tstsetup)
     }
   }
+})
+
+test_that("the projection cache does not change the results", {
+  skip_if_not(run_vs)
+  # GLMs (traditional projection) of the families covered by the multi-draw
+  # fitters:
+  is_glm_multi <- function(args_i) {
+    identical(args_i$mod_nm, "glm") && identical(args_i$prj_nm, "trad") &&
+      args_i$fam_nm %in% c("gauss", "brnll", "binom", "poiss")
+  }
+  tstsetups <- names(vss)[vapply(args_vs[names(vss)], is_glm_multi,
+                                 logical(1))]
+  expect_gt(length(tstsetups), 0)
+  for (tstsetup in tstsetups) {
+    args_vs_i <- args_vs[[tstsetup]]
+    vs_nocache <- withr::with_options(
+      list(projpred.proj_cache = FALSE),
+      do.call(varsel, c(
+        list(object = refmods[[args_vs_i$tstsetup_ref]]),
+        excl_nonargs(args_vs_i)
+      ))
+    )
+    expect_equal(vs_nocache, vss[[tstsetup]], info = tstsetup)
+  }
+  expect_identical(proj_cache$depth, 0L)
+  expect_length(proj_cache$stores, 0)
+
+  # cv_varsel() with LOO CV and a validated search (the folds reuse the cache
+  # entries of the full-data search):
+  skip_if_not(run_cvvs)
+  # (The setup uses L1 search for these models, so the forward search is set
+  # here.)
+  is_cv_case <- function(args_i) {
+    is_glm_multi(args_i) && args_i$fam_nm != "gauss" &&
+      !identical(args_i$cv_method, "kfold")
+  }
+  tstsetups_cv <- names(cvvss)[vapply(args_cvvs[names(cvvss)], is_cv_case,
+                                      logical(1))]
+  expect_gt(length(tstsetups_cv), 0)
+  for (tstsetup in head(tstsetups_cv, 2)) {
+    args_cvvs_i <- args_cvvs[[tstsetup]]
+    args_cvvs_i$method <- "forward"
+    args_cvvs_i$validate_search <- TRUE
+    args_cvvs_i$nloo <- 5L
+    cvvs_call <- function() {
+      suppressWarnings(do.call(cv_varsel, c(
+        list(object = refmods[[args_cvvs_i$tstsetup_ref]]),
+        excl_nonargs(args_cvvs_i)
+      )))
+    }
+    cvvs_cache <- cvvs_call()
+    cvvs_nocache <- withr::with_options(list(projpred.proj_cache = FALSE),
+                                        cvvs_call())
+    expect_equal(cvvs_nocache, cvvs_cache, info = tstsetup)
+    # Size limit 0: each new entry changes the generations of the cache, and
+    # each hit in the `old` generation does so again:
+    cvvs_small <- withr::with_options(list(projpred.proj_cache_mb = 0),
+                                      cvvs_call())
+    expect_equal(cvvs_small, cvvs_cache, info = tstsetup)
+  }
+  expect_identical(proj_cache$depth, 0L)
+})
+
+test_that("the projection cache keeps its size limit", {
+  val <- numeric(100)
+  val_bytes <- as.numeric(utils::object.size(val))
+  # Room for one entry:
+  opts_old <- options(projpred.proj_cache_mb = 1.5 * val_bytes / 2^20)
+  on.exit(options(opts_old), add = TRUE)
+  proj_cache_enter()
+  on.exit(proj_cache_exit(), add = TRUE)
+  store <- proj_cache_store(list(fetch_data = local(function() NULL)))
+  store2 <- proj_cache_store(list(fetch_data = local(function() NULL)))
+  expect_length(proj_cache$stores, 2)
+  proj_cache_put(store2, "z", val)
+  # Change of generations in both stores: `z` moves to `old`:
+  proj_cache_put(store, "a", val)
+  expect_true(exists("z", envir = store2$old, inherits = FALSE))
+  expect_identical(proj_cache_get(store, "a"), val)
+  # Change of generations: `a` moves to `old`, `z` is dropped:
+  proj_cache_put(store, "b", val)
+  expect_true(exists("a", envir = store$old, inherits = FALSE))
+  expect_false(exists("a", envir = store$cur, inherits = FALSE))
+  expect_null(proj_cache_get(store2, "z"))
+  # A hit in `old` moves `a` back to `cur` (and `b` to `old`):
+  expect_identical(proj_cache_get(store, "a"), val)
+  expect_true(exists("a", envir = store$cur, inherits = FALSE))
+  expect_true(exists("b", envir = store$old, inherits = FALSE))
+  # The next change of generations drops `b`:
+  proj_cache_put(store, "c", val)
+  expect_null(proj_cache_get(store, "b"))
+  expect_identical(proj_cache_get(store, "a"), val)
+  expect_lte(proj_cache$bytes, 1.5 * val_bytes)
+  # A key of more than 10000 bytes (too long for a name) is not cached:
+  long_key <- strrep("x", 10001)
+  bytes_old <- proj_cache$bytes
+  proj_cache_put(store, long_key, val)
+  expect_null(proj_cache_get(store, long_key))
+  expect_identical(proj_cache$bytes, bytes_old)
+  expect_identical(proj_cache_get(store, "a"), val)
+  # A nested call keeps the cache and its limit:
+  options(projpred.proj_cache_mb = 0)
+  proj_cache_enter()
+  proj_cache_exit()
+  expect_identical(proj_cache_get(store, "a"), val)
+  expect_identical(proj_cache$limit, 1.5 * val_bytes)
+  expect_length(proj_cache$stores, 2)
+  # The outermost exit empties the cache:
+  proj_cache_exit()
+  expect_identical(proj_cache$depth, 0L)
+  expect_length(proj_cache$stores, 0)
+  expect_identical(proj_cache$bytes, 0)
+  # An invalid limit:
+  options(projpred.proj_cache_mb = NA)
+  expect_error(proj_cache_enter(), "projpred.proj_cache_mb")
+  expect_identical(proj_cache$depth, 0L)
+  # (proj_cache_exit() of the on.exit() call above keeps `depth` at 0.)
 })
 
 test_that("`seed` works (and restores the RNG state afterwards)", {
@@ -181,20 +297,8 @@ test_that(paste(
   "posterior_epred() and log_lik()"
 ), {
   skip_if_not(run_vs)
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
+  withr::local_preserve_seed()
   tstsetups <- names(vss)
-  ### TODO (GAMMs): Currently, the following test setups (can) lead to the error
-  ### ```
-  ### Error in t(as.matrix(b$reTrms$Zt[ii, ])) %*%
-  ### as.matrix(c(as.matrix(ranef[[i]]))) :
-  ###   non-conformable arguments
-  ### ```
-  ### thrown by predict.gamm4(). This needs to be fixed. For now, exclude these
-  ### test setups:
-  tstsetups <- grep("\\.gamm\\.", tstsetups, value = TRUE, invert = TRUE)
-  ###
   for (tstsetup in tstsetups) {
     args_vs_i <- args_vs[[tstsetup]]
     tstsetup_ref <- args_vs_i$tstsetup_ref
@@ -495,7 +599,6 @@ test_that(paste(
     expect_equal(vs_indep$summaries$ref$lppd, lppd_ref_ch2,
                  tolerance = 1e2 * .Machine$double.eps, info = tstsetup)
   }
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
 })
 
 ## refit_prj --------------------------------------------------------------
@@ -553,7 +656,7 @@ if (run_more) {
     "the warning for full Gaussian multilevel models is thrown correctly"
   ), {
     skip_if_not(run_vs)
-    warn_instable_orig <- options(projpred.warn_instable_projections = NULL)
+    withr::local_options(list(projpred.warn_instable_projections = NULL))
     tstsetups <- names(vss)
     pick_these <- sapply(tstsetups, function(tstsetup) {
       refmod_i <- refmods[[args_vs[[tstsetup]]$tstsetup_ref]]
@@ -566,10 +669,12 @@ if (run_more) {
     skip_if_not(length(tstsetups) > 0)
     for (tstsetup in tstsetups) {
       args_vs_i <- args_vs[[tstsetup]]
+      # The group-level terms of an rstanarm::stan_gamm4() fit are not in
+      # `args_fit[[...]]$formula`, so use the reference model formula:
       if (identical(args_vs_i$nterms_max, unname(ntermss[args_vs_i$mod_nm])) &&
-          any(grepl("\\|", labels(terms(
-            args_fit[[args_vs_i$tstsetup_fit]]$formula
-          ))))) {
+          formula_contains_group_terms(
+            refmods[[args_vs_i$tstsetup_ref]]$formula
+          )) {
         warn_expected <- "the projection onto the full model can be instable"
       } else {
         warn_expected <- NA
@@ -584,7 +689,6 @@ if (run_more) {
         info = tstsetup
       )
     }
-    options(warn_instable_orig)
   })
 }
 
@@ -594,7 +698,7 @@ if (run_more) {
   test_that("the message when cutting off the search is thrown correctly", {
     skip_if_not(run_vs)
     skip_if_not_installed("rstanarm")
-    mssg_cut_search_orig <- options(projpred.mssg_cut_search = NULL)
+    withr::local_options(list(projpred.mssg_cut_search = NULL))
     dat_gauss <- data.frame(y = df_gaussian$y, df_gaussian$x)
     stopifnot(sum(grepl("^X", names(dat_gauss))) > 19)
     fit_exceed <- suppressWarnings(rstanarm::stan_glm(
@@ -628,7 +732,6 @@ if (run_more) {
         info = paste("fit_not_exceed, nterms_max =", nterms_max_i %||% "NULL")
       )
     }
-    options(mssg_cut_search_orig)
   })
 }
 
@@ -959,7 +1062,7 @@ test_that("for L1 search, `penalty` has an expected effect", {
 test_that("L1 search handles three-way (second-order) interactions correctly", {
   skip_if_not(run_vs)
   skip_if_not_installed("rstanarm")
-  warn_L1_ia_orig <- options(projpred.warn_L1_interactions = TRUE)
+  withr::local_options(list(projpred.warn_L1_interactions = TRUE))
   main_terms_in_ia <- c("xca.2", "xco.3", "xco.1")
   all_ias_split <- lapply(seq_along(main_terms_in_ia), combn,
                           x = main_terms_in_ia, simplify = FALSE)
@@ -967,6 +1070,7 @@ test_that("L1 search handles three-way (second-order) interactions correctly", {
     lapply(ia_split, all_ia_perms, is_split = TRUE)
   }))
   trms_universe_split_bu <- trms_universe_split
+  withr::defer(trms_universe_split <<- trms_universe_split_bu)
   trms_universe_split <<- union(trms_universe_split, all_ias)
   tstsetup <- head(grep("^rstanarm\\.glm\\.", names(fits), value = TRUE), 1)
   args_fit_i <- args_fit[[tstsetup]]
@@ -1020,8 +1124,6 @@ test_that("L1 search handles three-way (second-order) interactions correctly", {
     })),
     info = tstsetup
   )
-  trms_universe_split <<- trms_universe_split_bu
-  options(warn_L1_ia_orig)
 })
 
 ## search_terms -----------------------------------------------------------
@@ -1170,8 +1272,6 @@ test_that("varsel.vsel() works for `vsel` objects from cv_varsel()", {
 
 # cv_varsel() -------------------------------------------------------------
 
-context("cv_varsel()")
-
 test_that(paste(
   "`object` of class `refmodel` and arguments `method`, `cv_method`,",
   "`nterms_max`, `nclusters`, and `nclusters_pred` work"
@@ -1213,6 +1313,7 @@ test_that("invalid `object` fails", {
 })
 
 test_that("invalid `method` fails", {
+  skip_if_no_setups(refmods)
   for (tstsetup in names(refmods)) {
     expect_error(cv_varsel(refmods[[tstsetup]], method = "k-fold"),
                  "^Unexpected value for argument `method`\\.$",
@@ -1235,6 +1336,7 @@ test_that("invalid `method` fails", {
 })
 
 test_that("invalid `cv_method` fails", {
+  skip_if_no_setups(refmods)
   for (tstsetup in names(refmods)) {
     expect_error(cv_varsel(refmods[[tstsetup]], cv_method = "k-fold"),
                  "^Unknown `cv_method`\\.$",
@@ -1340,7 +1442,7 @@ if (run_more) {
   test_that("the message when cutting off the search is thrown correctly", {
     skip_if_not(run_vs)
     skip_if_not_installed("rstanarm")
-    mssg_cut_search_orig <- options(projpred.mssg_cut_search = NULL)
+    withr::local_options(list(projpred.mssg_cut_search = NULL))
     dat_gauss <- data.frame(y = df_gaussian$y, df_gaussian$x)
     stopifnot(sum(grepl("^X", names(dat_gauss))) > 19)
     fit_exceed <- suppressWarnings(rstanarm::stan_glm(
@@ -1376,7 +1478,6 @@ if (run_more) {
         info = paste("fit_not_exceed, nterms_max =", nterms_max_i %||% "NULL")
       )
     }
-    options(mssg_cut_search_orig)
   })
 }
 
@@ -1537,9 +1638,14 @@ test_that("`validate_search` works", {
     if (identical(args_cvvs_i$cv_method, "kfold")) {
       vsel_nms_valsearch_crr <- setdiff(vsel_nms_valsearch_crr, "ce")
     }
-    expect_equal(cvvs_valsearch[setdiff(vsel_nms, vsel_nms_valsearch_crr)],
-                 cvvss[[tstsetup]][setdiff(vsel_nms, vsel_nms_valsearch_crr)],
+    # Element `loo_perturb_alpha` differs only for LOO CV with
+    # `refit_prj = TRUE`, so the test checks it separately:
+    vsel_nms_eq <- setdiff(vsel_nms,
+                           c(vsel_nms_valsearch_crr, "loo_perturb_alpha"))
+    expect_equal(cvvs_valsearch[vsel_nms_eq], cvvss[[tstsetup]][vsel_nms_eq],
                  info = tstsetup)
+    # Without fold-wise searches, no search uses the weight perturbation:
+    expect_identical(cvvs_valsearch$loo_perturb_alpha, Inf, info = tstsetup)
     expect_identical(cvvs_valsearch$summaries$ref,
                      cvvss[[tstsetup]]$summaries$ref,
                      info = tstsetup)
@@ -1619,6 +1725,9 @@ test_that(paste(
     }
     tstsetups <- tstsetups_tmp
   }
+  # Test setups for which rstanarm::kfold() fails (the skip at the end of this
+  # test lists them):
+  kfold_failed <- character()
   for (tstsetup in tstsetups) {
     args_cvvs_i <- args_cvvs[[tstsetup]]
     tstsetup_fit <- args_cvvs_i$tstsetup_fit
@@ -1638,13 +1747,10 @@ test_that(paste(
       # belonging to the same level of a variable with group-level effects are
       # in the same fold, so prediction is performed for new levels (see, e.g.,
       # brms's GitHub issue #1286):
-      if (exists(".Random.seed", envir = .GlobalEnv)) {
-        rng_old <- get(".Random.seed", envir = .GlobalEnv)
-      }
       # Make the construction of the CV folds reproducible:
-      set.seed(seed2_tst * 3L)
-      folds_vec <- loo::kfold_split_grouped(K = K_crr, x = dat$z.1)
-      if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
+      folds_vec <- withr::with_seed(seed2_tst * 3L, {
+        loo::kfold_split_grouped(K = K_crr, x = dat$z.1)
+      })
     } else {
       folds_vec <- cv_folds(nobsv, K = K_crr, seed = seed2_tst)
     }
@@ -1659,9 +1765,9 @@ test_that(paste(
                                             cores = 1)),
                      silent = TRUE)
     if (inherits(kfold_obj, "try-error")) {
-      message("Could not test `tstsetup = \"", tstsetup, "\"` in the rstanarm ",
-              "`cvfits` test. Error message: \"",
-              attr(kfold_obj, "condition")$message, "\"")
+      kfold_failed <- c(kfold_failed, paste0(
+        tstsetup, " (", attr(kfold_obj, "condition")$message, ")"
+      ))
       next
     }
     kfold_obj <- structure(kfold_obj$fits[, "fit"], folds = folds_vec)
@@ -1718,6 +1824,9 @@ test_that(paste(
       )
     }
   }
+  skip_if(length(kfold_failed) > 0,
+          paste("rstanarm::kfold() failed for:",
+                paste(kfold_failed, collapse = "; ")))
 })
 
 test_that(paste(
@@ -1752,13 +1861,10 @@ test_that(paste(
       # belonging to the same level of a variable with group-level effects are
       # in the same fold, so prediction is performed for new levels (see, e.g.,
       # brms's GitHub issue #1286):
-      if (exists(".Random.seed", envir = .GlobalEnv)) {
-        rng_old <- get(".Random.seed", envir = .GlobalEnv)
-      }
       # Make the construction of the CV folds reproducible:
-      set.seed(seed2_tst + 10L)
-      folds_vec <- loo::kfold_split_grouped(K = K_crr, x = dat$z.1)
-      if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
+      folds_vec <- withr::with_seed(seed2_tst + 10L, {
+        loo::kfold_split_grouped(K = K_crr, x = dat$z.1)
+      })
     } else if (grepl("\\.gam\\.", tstsetup)) {
       folds_vec <- cv_folds(nobsv, K = K_crr, seed = seed2_tst + 10L)
     } else {
@@ -2638,9 +2744,7 @@ test_that("argument `folds` of run_cvfun() works", {
   if (!run_more) {
     tstsetups <- head(tstsetups, 1)
   }
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
+  withr::local_preserve_seed()
   for (tstsetup in tstsetups) {
     set.seed(seed3_tst)
     folds_sep <- cv_folds(nobsv, K = K_tst)
@@ -2648,5 +2752,4 @@ test_that("argument `folds` of run_cvfun() works", {
     expect_identical(lapply(cvfits_sep, as.matrix),
                      lapply(cvfitss[[tstsetup]], as.matrix), info = tstsetup)
   }
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
 })

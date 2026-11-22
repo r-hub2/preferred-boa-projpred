@@ -1,8 +1,8 @@
 Package: projpred
 Encoding: UTF-8
 Title: Projection Predictive Feature Selection
-Version: 2.11.0.9000
-Date: 2026-09-30
+Version: 3.0.0
+Date: 2026-11-20
 Authors@R: c(person("Juho", "Piironen", role = c("aut"),
                     email = "juho.t.piironen@gmail.com"),
              person("Markus", "Paasiniemi", role = "aut"),
@@ -37,24 +37,23 @@ Description:
 License: GPL-3 | file LICENSE
 URL: https://mc-stan.org/projpred/, https://discourse.mc-stan.org
 BugReports: https://github.com/stan-dev/projpred/issues/
-Depends: R (>= 3.6.0)
-Imports: methods, utils, Rcpp, gtools, ggplot2, scales, rstantools (>=
-        2.0.0), loo (>= 2.0.0), lme4 (>= 1.1-28), mvtnorm, mgcv, gamm4,
-        abind, MASS, ordinal, nnet, mclogit, reformulas,
-Suggests: ggrepel, ggfortify, rstanarm, brms, nlme, optimx, ucminf,
-        parallel, foreach, iterators, doRNG, unix, testthat, vdiffr,
-        knitr, rmarkdown, glmnet, cmdstanr, rlang, bayesplot (>=
-        1.5.0), posterior, doParallel, future, future.callr, doFuture,
-        progressr
+Depends: R (>= 4.4.0)
+Imports: methods, utils, parallel, Rcpp, ggplot2, scales, rstantools
+        (>= 2.0.0), loo (>= 2.10.1), posterior (>= 1.7.0), lme4 (>=
+        2.0-1), mvtnorm, mgcv, gamm4 (>= 0.3-0), abind, MASS, ordinal,
+        nnet, mclogit, reformulas,
+Suggests: ggrepel, ggfortify, rstanarm, brms, nlme, Matrix, optimx,
+        ucminf, testthat (>= 3.1.7), withr (>= 3.0.3), vdiffr, knitr,
+        rmarkdown, glmnet, cmdstanr, rlang, bayesplot (>= 1.5.0),
+        future (>= 1.49.0), future.mirai (>= 0.10.1), parallelly,
+        globals, progressr, codetools
 LinkingTo: Rcpp, RcppArmadillo
 Additional_repositories: https://stan-dev.r-universe.dev/
-Remotes: stan-dev/cmdstanr
 LazyData: TRUE
-Roxygen: list(markdown = TRUE)
 VignetteBuilder: knitr, rmarkdown
-Config/roxygen2/version: 8.0.0
+Config/roxygen2/version: 8.1.1
 NeedsCompilation: yes
-Packaged: 2026-10-27 07:30:38 UTC; ave
+Packaged: 2026-11-20 18:50:19 UTC; osvaldo
 Author: Juho Piironen [aut],
   Markus Paasiniemi [aut],
   Alejandro Catalina [aut],
@@ -71,3 +70,6 @@ Author: Juho Piironen [aut],
   Yann McLatchie [ctb],
   Juho Timonen [ctb]
 Maintainer: Osvaldo Martin <aloctavodia@gmail.com>
+Repository: CRAN
+Date/Publication: 2026-11-20 20:10:12 UTC
+Remotes: stan-dev/cmdstanr

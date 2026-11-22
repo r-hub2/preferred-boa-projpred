@@ -11,11 +11,52 @@ proj_to_submodl <- function(predictor_terms, p_ref, refmodel,
   if (refmodel$family$for_latent && !is.null(y_unqs_aug)) {
     y_unqs_aug <- NULL
   }
-  subset <- subset_formula_and_data(
-    formula = refmodel$formula, terms_ = unique(unlist(predictor_terms)),
-    data = refmodel$fetch_data(), y = p_ref$mu, y_unqs = y_unqs_aug
-  )
-  fml_divmin <- flatten_formula(subset$formula)
+  terms_ <- unique(unlist(predictor_terms))
+  if (!is.null(search_control)) {
+    dot_args_divmin <- search_control
+  } else {
+    dot_args_divmin <- list(...)
+  }
+  # Fast path for the multi-draw fitters of divmin() (see divmin_multi()): the
+  # submodel formula, the draw-wise formulas and the shared model matrix depend
+  # only on the reference model and the predictor terms, so proj_cache_store()
+  # caches them. The submodel fits are the same as from divmin().
+  use_fast <- is.null(y_unqs_aug) &&
+    identical(refmodel$div_minimizer, divmin) &&
+    proj_fast_ok(dot_args_divmin) &&
+    !anyNA(p_ref$mu)
+  store <- if (use_fast) proj_cache_store(refmodel) else NULL
+  ent <- NULL
+  if (!is.null(store)) {
+    cache_key <- paste(c(terms_, NCOL(p_ref$mu)), collapse = "\r")
+    ent <- proj_cache_get(store, cache_key)
+  }
+  subset <- NULL
+  if (is.null(ent)) {
+    prep <- NULL
+    if (!is.null(store)) {
+      ent_design <- proj_prepare_design(store, refmodel, terms_, p_ref$mu)
+      if (!is.null(ent_design)) {
+        fml_divmin <- ent_design$fml_divmin
+        prep <- ent_design$prep
+      }
+    }
+    if (is.null(prep)) {
+      ent_general <- proj_prepare_general(refmodel, terms_, p_ref$mu,
+                                          y_unqs = y_unqs_aug,
+                                          use_fast = use_fast)
+      subset <- ent_general$subset
+      fml_divmin <- ent_general$fml_divmin
+      prep <- ent_general$prep
+    }
+    if (!is.null(store)) {
+      proj_cache_put(store, cache_key,
+                     list(fml_divmin = fml_divmin, prep = prep))
+    }
+  } else {
+    fml_divmin <- ent$fml_divmin
+    prep <- ent$prep
+  }
 
   if (verbose >= 2L) {
     rhs_chr <- as.character(fml_divmin)
@@ -26,24 +67,170 @@ proj_to_submodl <- function(predictor_terms, p_ref, refmodel,
     verb_out("  Projecting onto `~ ", utils::tail(rhs_chr, 1), "`")
   }
 
-  args_divmin <- list(formula = fml_divmin,
-                      data = subset$data,
-                      family = refmodel$family,
-                      weights = refmodel$wobs,
-                      projpred_var = p_ref$var,
-                      projpred_ws_aug = p_ref$mu,
-                      verbose_divmin = verbose >= 3L)
-  if (!is.null(search_control)) {
-    args_divmin <- c(args_divmin, search_control)
-  } else {
-    args_divmin <- c(args_divmin, list(...))
+  outdmin <- NULL
+  if (use_fast && !is.null(prep)) {
+    outdmin <- divmin_multi(
+      prep$formulas, shared_x = prep$shared_x,
+      dot_args = c(list(family = refmodel$family, weights = refmodel$wobs),
+                   dot_args_divmin),
+      throw_warn_sdivmin = getOption("projpred.warn_proj_drawwise", TRUE),
+      do_check_conv = getOption("projpred.check_convergence", TRUE),
+      y = unclass(p_ref$mu)
+    )
   }
-  outdmin <- do.call(refmodel$div_minimizer, args_divmin)
+  if (is.null(outdmin)) {
+    if (is.null(subset)) {
+      subset <- subset_formula_and_data(
+        formula = refmodel$formula, terms_ = terms_,
+        data = refmodel$fetch_data(), y = p_ref$mu, y_unqs = y_unqs_aug
+      )
+      subset$data <- set_contrasts(subset$data, refmodel$contrasts)
+    }
+    projpred_ws_aug <- p_ref$mu
+    if (refmodel$family$for_augdat && any(refmodel$wobs != 1)) {
+      # The augmented-data submodel fitters use the probabilities of the
+      # response categories as weights and ignore `weights`, so apply the
+      # observation weights to these probabilities. The rows of the
+      # augmented-rows matrix are the observations within the response
+      # categories:
+      projpred_ws_aug <- projpred_ws_aug *
+        rep(refmodel$wobs,
+            times = nrow(projpred_ws_aug) / length(refmodel$wobs))
+    }
+    args_divmin <- c(list(formula = fml_divmin,
+                          data = subset$data,
+                          family = refmodel$family,
+                          weights = refmodel$wobs,
+                          projpred_var = p_ref$var,
+                          projpred_ws_aug = projpred_ws_aug,
+                          verbose_divmin = verbose >= 3L),
+                     dot_args_divmin)
+    outdmin <- do.call(refmodel$div_minimizer, args_divmin)
+  }
 
   return(init_submodl(
     outdmin = outdmin, p_ref = p_ref, refmodel = refmodel,
     predictor_terms = predictor_terms, wobs = refmodel$wobs
   ))
+}
+
+# The general path of proj_to_submodl() for the predictor terms `terms_` and the
+# draw-wise responses `y`: the submodel formula and data (see
+# subset_formula_and_data()) and, if `use_fast`, the output of
+# divmin_prepare(). Returns a list with elements `subset`, `fml_divmin` and
+# `prep`.
+proj_prepare_general <- function(refmodel, terms_, y, y_unqs = NULL,
+                                 use_fast = TRUE) {
+  subset <- subset_formula_and_data(
+    formula = refmodel$formula, terms_ = terms_,
+    data = refmodel$fetch_data(), y = y, y_unqs = y_unqs
+  )
+  subset$data <- set_contrasts(subset$data, refmodel$contrasts)
+  # A linear term next to a smooth term of the same variable (`x` and `s(x)`)
+  # is dropped (see smooth_covered_terms()):
+  fml_divmin <- flatten_formula(subset$formula, duplicates = FALSE)
+  prep <- if (use_fast) divmin_prepare(fml_divmin, subset$data) else NULL
+  return(nlist(subset, fml_divmin, prep))
+}
+
+# The cache entry of proj_to_submodl() (the submodel formula and the output of
+# divmin_prepare()) for the predictor terms `terms_` and the draw-wise
+# responses `y`, from the model matrix of all main-effect terms that the cache
+# store `store` keeps (see design_main_effects()). This avoids the data frame of
+# subset_formula_and_data() and the model frame and model matrix of each
+# submodel. The entry is the same as that of proj_prepare_general(). Returns
+# `NULL` if the design does not cover the submodel; then proj_to_submodl()
+# takes the general path.
+proj_prepare_design <- function(store, refmodel, terms_, y) {
+  # The design costs about as much as a few misses of the general path, so it
+  # is built at the third miss of a store (for example, project() has only a
+  # few misses):
+  store$design_misses <- (store$design_misses %||% 0L) + 1L
+  if (store$design_misses < 3L) {
+    return(NULL)
+  }
+  # model.matrix() codes the factors with the contrasts of `options()` at the
+  # time of the call:
+  ctr_opt <- getOption("contrasts")
+  if (is.null(store$design_ok) || !identical(store$design_ctr_opt, ctr_opt)) {
+    data <- set_contrasts(refmodel$fetch_data(), refmodel$contrasts)
+    design <- design_main_effects(refmodel$formula, data)
+    # The design stays in the store until the end of the outermost call, and
+    # the size limit of the cache (see proj_cache_add()) does not count it, so
+    # a large design is not built:
+    if (!is.null(design) &&
+        as.numeric(utils::object.size(design)) > proj_cache$limit / 4) {
+      design <- NULL
+    }
+    store$design <- design
+    store$design_ok <- !is.null(design)
+    store$design_ctr_opt <- ctr_opt
+    store$design_rn_y <- NULL
+    store$design_y_names <- NULL
+  }
+  if (!store$design_ok) {
+    return(NULL)
+  }
+  # The row names of the data frame of subset_formula_and_data() come from the
+  # names of `y` if it has them:
+  rn_y <- if (is.null(dim(y))) names(y) else rownames(y)
+  if (is.null(store$design_y_names) || !identical(store$design_rn_y, rn_y)) {
+    y_names <- tryCatch(
+      as.character(attr(data.frame(.z = y, refmodel$fetch_data()),
+                        "row.names")),
+      error = function(e) NULL
+    )
+    if (is.null(y_names)) {
+      return(NULL)
+    }
+    store$design_rn_y <- rn_y
+    store$design_y_names <- y_names
+    # The model matrix has these names as row names:
+    if (!identical(rownames(store$design$x), y_names)) {
+      rownames(store$design$x) <- y_names
+    }
+  }
+  subset <- subset_formula_and_data(
+    formula = refmodel$formula, terms_ = terms_, data = NULL, y = y,
+    with_data = FALSE
+  )
+  fml_divmin <- flatten_formula(subset$formula, duplicates = FALSE)
+  trms <- extract_terms_response(fml_divmin)
+  if (length(trms$group_terms) > 0 || length(trms$additive_terms) > 0) {
+    return(NULL)
+  }
+  formulas <- validate_response_formula(fml_divmin)
+  if (length(formulas) < 1) {
+    return(NULL)
+  }
+  shared_x <- shared_x_from_design(formulas, store$design,
+                                   store$design_y_names)
+  if (is.null(shared_x)) {
+    return(NULL)
+  }
+  return(list(fml_divmin = fml_divmin, prep = nlist(formulas, shared_x)))
+}
+
+# Whether proj_to_submodl() may call divmin_multi() instead of divmin(), with
+# the arguments `dot_args` for the divergence minimizer. This requires that
+# divmin() uses fit_glm_ridge_callback() and the current global options for
+# warnings and convergence checks, and that `dot_args` holds no argument of
+# divmin() itself.
+proj_fast_ok <- function(dot_args) {
+  if (!identical(getOption("projpred.glm_fitter", "fit_glm_ridge_callback"),
+                 "fit_glm_ridge_callback")) {
+    return(FALSE)
+  }
+  if ((is.null(getOption("projpred.warn_proj_drawwise")) &&
+       !is.null(getOption("projpred.warn_prj_drawwise"))) ||
+      (is.null(getOption("projpred.check_convergence")) &&
+       !is.null(getOption("projpred.check_conv")))) {
+    return(FALSE)
+  }
+  return(!any(names(dot_args) %in% c("throw_warn_sdivmin", "do_check_conv",
+                                     "formula", "data", "family", "weights",
+                                     "projpred_var", "projpred_ws_aug",
+                                     "verbose_divmin")))
 }
 
 # Function to prepare the performance evaluation. For each submodel size along
@@ -63,6 +250,10 @@ perf_eval <- function(search_path,
                       y_oscale_test = refmodel_fulldata$y_oscale[indices_test],
                       verbose = FALSE, verbose_line_length = 5,
                       verbose_txt_add = "", ...) {
+  # Whether to try perf_eval_gauss() (see below):
+  use_gauss_crossprod <- refit_prj && !is.null(reweighting_args) &&
+    !return_submodls && !return_preds &&
+    getOption("projpred.search_gauss_crossprod", TRUE)
   if (!refit_prj) {
     p_ref <- search_path$p_sel
     # In this case, simply fetch the already computed projections, so don't
@@ -83,16 +274,29 @@ perf_eval <- function(search_path,
       p_ref <- get_refdist(refmodel, ndraws = ndraws, nclusters = nclusters)
     } else {
       # Reweight the clusters (or thinned draws) according to the PSIS weights:
-      p_ref <- get_p_clust(
-        family = refmodel$family, eta = refmodel$eta, mu = refmodel$mu,
-        mu_offs = refmodel$mu_offs, dis = refmodel$dis,
-        wdraws = reweighting_args$wdraws_ref, cl = reweighting_args$cl_ref,
-        clust_used_forced = clust_info(
-          ndraws = ndraws,
-          nclusters = nclusters,
-          S = length(refmodel$wdraws_ref)
-        )[["clust_used"]]
-      )
+      clust_used_forced <- clust_info(
+        ndraws = ndraws,
+        nclusters = nclusters,
+        S = length(refmodel$wdraws_ref)
+      )[["clust_used"]]
+      p_clust <- function(as_moments = FALSE) {
+        get_p_clust(
+          family = refmodel$family, eta = refmodel$eta, mu = refmodel$mu,
+          mu_offs = refmodel$mu_offs, dis = refmodel$dis,
+          wdraws = reweighting_args$wdraws_ref, cl = reweighting_args$cl_ref,
+          clust_used_forced = clust_used_forced, as_moments = as_moments
+        )
+      }
+      p_ref <- NULL
+      if (use_gauss_crossprod && !return_p_ref &&
+          !is.null(gauss_crossprod_regul(refmodel, list(...)))) {
+        # Without the observations x draws matrices, if possible (p_clust()
+        # computes them later if they are needed):
+        p_ref <- p_clust(as_moments = TRUE)
+      }
+      if (is.null(p_ref)) {
+        p_ref <- p_clust()
+      }
     }
     fetch_submodl <- function(size_j, ...) {
       return(proj_to_submodl(
@@ -106,7 +310,24 @@ perf_eval <- function(search_path,
            txt_clust_draws(p_ref[["clust_used"]], p_ref[["nprjdraws"]]),
            " (`refit_prj = ", refit_prj, "`) ...",
            verbose = verbose && !return_submodls)
-  out_by_size <- lapply(nterms, function(size_j) {
+  out_by_size <- NULL
+  if (use_gauss_crossprod) {
+    # In the LOO CV with validated search, compute the evaluation of Gaussian
+    # submodels from cross-products (`NULL` if this case does not apply):
+    out_by_size <- perf_eval_gauss(
+      search_path = search_path, nterms = nterms, refmodel = refmodel,
+      p_ref = p_ref, refmodel_fulldata = refmodel_fulldata,
+      indices_test = indices_test, newdata_test = newdata_test,
+      offset_test = offset_test, wobs_test = wobs_test, y_test = y_test,
+      y_oscale_test = y_oscale_test, divmin_args = list(...),
+      p_ref_full = p_clust
+    )
+    if (is.null(out_by_size) && isTRUE(p_ref$moments_only)) {
+      # The projections below need the full `p_ref`:
+      p_ref <- p_clust()
+    }
+  }
+  if (is.null(out_by_size)) out_by_size <- lapply(nterms, function(size_j) {
     # Fetch the init_submodl() output (of class `submodl`) for the submodel at
     # position `size_j + 1` of the predictor ranking:
     submodl <- fetch_submodl(size_j, ...)

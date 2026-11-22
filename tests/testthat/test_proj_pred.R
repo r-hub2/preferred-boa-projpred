@@ -1,7 +1,5 @@
 # proj_linpred() ----------------------------------------------------------
 
-context("proj_linpred()")
-
 ## object -----------------------------------------------------------------
 
 test_that("pl: `object` of class `projection` works", {
@@ -27,12 +25,12 @@ test_that("pl: `object` of class `projection` works", {
               info_str = tstsetup)
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pls[[tstsetup]]))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pls[[tstsetup]]))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -76,12 +74,12 @@ test_that(paste(
               info_str = tstsetup)
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pls_vs[[tstsetup]]))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pls_vs[[tstsetup]]))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -125,12 +123,12 @@ test_that(paste(
               info_str = tstsetup)
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pls_cvvs[[tstsetup]]))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pls_cvvs[[tstsetup]]))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -313,10 +311,6 @@ test_that("`newdata` and `integrated` work (even in edge cases)", {
     }
     dat_crr <- get_dat(tstsetup)
     for (nobsv_crr in nobsv_tst) {
-      if (args_prj[[tstsetup]]$mod_nm == "gamm") {
-        # TODO (GAMMs): Fix this.
-        next
-      }
       if (args_prj[[tstsetup]]$prj_nm == "augdat") {
         ncats_nlats_expected_crr <- length(
           refmods[[args_prj[[tstsetup]]$tstsetup_ref]]$family$cats
@@ -797,13 +791,11 @@ test_that("`transform` works", {
     if (args_prj[[tstsetup]]$prj_nm != "latent") {
       pred_false2true <- prjs[[tstsetup]]$refmodel$family$linkinv(pred_false)
     } else {
-      if (exists(".Random.seed", envir = .GlobalEnv)) {
-        rng_old <- get(".Random.seed", envir = .GlobalEnv)
-      }
-      set.seed(args_prj[[tstsetup]]$seed)
-      clust_ref <- get_refdist(prjs[[tstsetup]]$refmodel,
-                               ndraws = args_prj[[tstsetup]]$ndraws,
-                               nclusters = args_prj[[tstsetup]]$nclusters)
+      clust_ref <- withr::with_seed(args_prj[[tstsetup]]$seed, {
+        get_refdist(prjs[[tstsetup]]$refmodel,
+                    ndraws = args_prj[[tstsetup]]$ndraws,
+                    nclusters = args_prj[[tstsetup]]$nclusters)
+      })
       pred_false2true <- structure(
         prjs[[tstsetup]]$refmodel$family$latent_ilink(
           t(pred_false), cl_ref = clust_ref$cl
@@ -812,7 +804,6 @@ test_that("`transform` works", {
       )
     }
     expect_equal(pred_false2true, pred_true, info = tstsetup)
-    if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
   }
 })
 
@@ -954,10 +945,6 @@ test_that(paste(
 ), {
   skip_if_not(run_prj)
   for (tstsetup in grep("\\.clust$", names(prjs), value = TRUE)) {
-    if (args_prj[[tstsetup]]$mod_nm == "gamm") {
-      # TODO (GAMMs): Fix this.
-      next
-    }
     if (grepl("\\.with_wobs|\\.binom", tstsetup)) {
       wobs_crr <- head(wobs_tst, 1)
     } else {
@@ -1019,7 +1006,6 @@ test_that(paste(
   "posterior::weight_draws()"
 ), {
   skip_if_not(run_prj)
-  skip_if_not_installed("posterior")
   for (tstsetup in names(prjs)) {
     ndr_ncl <- ndr_ncl_dtls(args_prj[[tstsetup]])
     for (transf_crr in c(FALSE, TRUE)) {
@@ -1067,8 +1053,6 @@ test_that(paste(
 
 # proj_predict() ----------------------------------------------------------
 
-context("proj_predict()")
-
 ## seed -------------------------------------------------------------------
 
 test_that("`.seed` works (and restores the RNG state afterwards)", {
@@ -1115,12 +1099,12 @@ test_that("pp: `object` of class `projection` works", {
               info_str = tstsetup)
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pps[[tstsetup]]))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pps[[tstsetup]]))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -1149,12 +1133,12 @@ test_that(paste(
               info_str = tstsetup)
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pps_vs[[tstsetup]]))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pps_vs[[tstsetup]]))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -1183,12 +1167,12 @@ test_that(paste(
               info_str = tstsetup)
     if (run_snaps) {
       if (testthat_ed_max2) local_edition(3)
-      width_orig <- options(width = 145)
-      expect_snapshot({
-        print(tstsetup)
-        print(rlang::hash(pps_cvvs[[tstsetup]]))
+      withr::with_options(list(width = 145), {
+        expect_snapshot({
+          print(tstsetup)
+          print(rlang::hash(pps_cvvs[[tstsetup]]))
+        })
       })
-      options(width_orig)
       if (testthat_ed_max2) local_edition(2)
     }
   }
@@ -1356,10 +1340,6 @@ test_that("`newdata` and `nresample_clusters` work (even in edge cases)", {
   skip_if_not(run_prj)
   for (tstsetup in names(prjs)) {
     for (nobsv_crr in nobsv_tst) {
-      if (args_prj[[tstsetup]]$mod_nm == "gamm") {
-        # TODO (GAMMs): Fix this.
-        next
-      }
       if (grepl("\\.with_wobs|\\.binom", tstsetup)) {
         wobs_crr <- head(prjs[[tstsetup]]$refmodel$wobs, nobsv_crr)
       } else {
@@ -1743,10 +1723,6 @@ test_that(paste(
 ), {
   skip_if_not(run_prj)
   for (tstsetup in grep("\\.clust$", names(prjs), value = TRUE)) {
-    if (args_prj[[tstsetup]]$mod_nm == "gamm") {
-      # TODO (GAMMs): Fix this.
-      next
-    }
     if (grepl("\\.with_wobs|\\.binom", tstsetup)) {
       wobs_crr <- head(wobs_tst, 1)
     } else {
@@ -1787,7 +1763,6 @@ test_that(paste(
 
 test_that("`return_draws_matrix` causes a conversion of the output type", {
   skip_if_not(run_prj)
-  skip_if_not_installed("posterior")
   for (tstsetup in names(prjs)) {
     for (r_oscale_crr in c(FALSE, TRUE)) {
       if (!r_oscale_crr && args_prj[[tstsetup]]$prj_nm != "latent") next

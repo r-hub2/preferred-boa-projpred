@@ -11,6 +11,7 @@ extend_family(
   latent_ilink = NULL,
   latent_ll_oscale = NULL,
   latent_ppd_oscale = NULL,
+  latent_epred = NULL,
   augdat_y_unqs = NULL,
   augdat_link = NULL,
   augdat_ilink = NULL,
@@ -24,7 +25,9 @@ extend_family(
 
 \item{latent}{A single logical value indicating whether to use the latent
 projection (\code{TRUE}) or not (\code{FALSE}). Note that setting \code{latent = TRUE}
-causes all arguments starting with \code{augdat_} to be ignored.}
+causes all arguments starting with \code{augdat_} to be ignored. The latent
+projection does not support the \code{\link[brms:categorical]{brms::categorical()}} family; use the
+augmented-data projection for it.}
 
 \item{latent_y_unqs}{Only relevant for a latent projection where the original
 response space has finite support (i.e., the original response values may
@@ -65,6 +68,15 @@ this function has the abbreviation "PPD" in its name (which stands for
 "posterior predictive distribution"), \pkg{projpred} currently only uses it
 in \code{\link[=proj_predict]{proj_predict()}}, i.e., for sampling from what would better be termed
 posterior-projection predictive distribution (PPPD).}
+
+\item{latent_epred}{Only relevant for the latent projection. Must be \code{NULL}
+if \code{family$cats} is not \code{NULL} (after taking \code{latent_y_unqs} into
+account). If not \code{NULL}, this needs to be the function computing the
+response-scale expected values from the output of \code{latent_ilink}. It is
+needed if the output of \code{latent_ilink} is not the expected value, for
+example the \code{meanlog} parameter of a log-normal distribution. If \code{NULL}
+(the default), the output of \code{latent_ilink} is used as the expected value.
+See also section "Latent projection" below.}
 
 \item{augdat_y_unqs}{Only relevant for augmented-data projection, in which
 case this needs to be the character vector of unique response values (which
@@ -270,7 +282,27 @@ matrix containing the response-scale (not latent-scale) draws from the
 posterior(-projection) predictive distributions for the \eqn{N} observations
 from its inputs.
 
-If the bodies of these three functions involve parameter draws from the
+The function supplied to argument \code{latent_epred} needs to have the prototype
+
+\if{html}{\out{<div class="sourceCode r">}}\preformatted{latent_epred(ilpreds, dis, cl_ref, wdraws_ref = rep(1, length(cl_ref)))
+}\if{html}{\out{</div>}}
+
+where the arguments accept the same input as the arguments of the same name
+of \code{latent_ll_oscale}. For a submodel, \code{dis} contains the projected draws of
+the dispersion parameter; for the reference model, it is \verb{<refmodel>$dis}
+(see argument \code{dis} of \code{\link[=init_refmodel]{init_refmodel()}}). If \verb{<refmodel>$dis} consists of
+only \code{NA}s, a \code{latent_epred} function that uses \code{dis} gives \code{NA}s for the
+reference model and the submodels. The return value of \code{latent_epred} needs
+to be an
+\eqn{S \times N}{S x N} matrix containing the response-scale expected
+values. \pkg{projpred} uses them for the response-scale predictions of
+\code{\link[=proj_linpred]{proj_linpred()}} (with \code{transform = TRUE}), \code{\link[=proj_epred]{proj_epred()}}, and
+\code{\link[=predict.refmodel]{predict.refmodel()}} (with \code{type = "response"}), and for the
+response-scale performance statistics \code{"mse"}, \code{"rmse"}, and \code{"R2"}. The
+functions \code{latent_ll_oscale} and \code{latent_ppd_oscale} still get the output of
+\code{latent_ilink}.
+
+If the bodies of these functions involve parameter draws from the
 reference model which have not been projected (e.g., for \code{latent_ilink}, the
 thresholds in an ordinal model), \code{\link[=cl_agg]{cl_agg()}} is provided as a helper function
 for aggregating these reference model draws in the same way as the draws have
@@ -284,6 +316,26 @@ for one observation. Note that although argument \code{wdraws_ref} has the suffi
 \verb{_ref}, \code{wdraws_ref} does not necessarily obtain weights for the \emph{initial}
 reference model's posterior draws: In case of \code{\link[=cv_varsel]{cv_varsel()}} with \code{cv_method = "kfold"}, these weights may refer to one of the \eqn{K} reference model
 refits (but in that case, they are constant anyway).
+
+In \code{\link[=cv_varsel]{cv_varsel()}} with \code{cv_method = "kfold"}, the reference model objects of
+the \eqn{K} folds are created by the \code{cvrefbuilder} function (see
+\code{\link[=init_refmodel]{init_refmodel()}}). The default \code{cvrefbuilder} functions of
+\code{\link[=get_refmodel.stanreg]{get_refmodel.stanreg()}} and \code{\link[brms:get_refmodel.brmsfit]{brms::get_refmodel.brmsfit()}} pass
+user-supplied functions \code{latent_ilink}, \code{latent_ll_oscale},
+\code{latent_ppd_oscale}, and \code{latent_epred} (and a user-supplied argument \code{dis},
+see \code{\link[=init_refmodel]{init_refmodel()}}) unchanged to the fold-wise reference model objects. If
+these functions take reference model draws from their enclosing environment
+(e.g., draws of a shape parameter), or if \code{dis} contains such draws, then the
+folds use the draws from the full-data fit. To use the draws from the
+fold-wise refits, define the functions (and compute \code{dis}) inside a function
+that takes the fitted model object as its argument and calls
+\code{\link[=get_refmodel]{get_refmodel()}}. Then define a function that calls this outer function with
+the fold-wise refit. For an \pkg{rstanarm} reference model, pass this
+function as argument \code{cvrefbuilder} of \code{\link[=get_refmodel.stanreg]{get_refmodel.stanreg()}}. Method
+\code{\link[brms:get_refmodel.brmsfit]{brms::get_refmodel.brmsfit()}} does not accept a \code{cvrefbuilder} argument;
+for a \pkg{brms} reference model, set element \code{cvrefbuilder} of the
+reference model object to this function instead. The latent-projection
+vignette shows an example.
 
 If \code{family$cats} is not \code{NULL} (after taking \code{latent_y_unqs} into account),
 then the response vector resulting from \code{extract_model_data} (see

@@ -1,5 +1,3 @@
-context("miscellaneous")
-
 # get_refdist() ----------------------------------------------------------
 
 ## ndraws and nclusters ---------------------------------------------------
@@ -8,10 +6,8 @@ test_that(paste(
   "get_refdist(): `ndraws = NULL` and `nclusters = NULL` leads to",
   "`ndraws = S` (and `nclusters = NULL`)"
 ), {
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
-  set.seed(seed2_tst)
+  skip_if_no_setups(refmods)
+  withr::local_seed(seed2_tst)
   for (tstsetup in names(refmods)) {
     refdist <- get_refdist(refmods[[tstsetup]])
     if (args_ref[[tstsetup]]$prj_nm == "augdat") {
@@ -31,17 +27,14 @@ test_that(paste(
       info_str = tstsetup
     )
   }
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
 })
 
 test_that(paste(
   "`ndraws` and/or `nclusters` too big causes them to be cut off at the number",
   "of posterior draws in the reference model"
 ), {
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
-  set.seed(seed2_tst)
+  skip_if_no_setups(refmods)
+  withr::local_seed(seed2_tst)
   for (tstsetup in names(refmods)) {
     for (ndraws_crr in list(nrefdraws + 1L)) {
       for (nclusters_crr in list(NULL, nrefdraws + 1L)) {
@@ -64,7 +57,6 @@ test_that(paste(
       }
     }
   }
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
 })
 
 # force_search_terms() ----------------------------------------------------
@@ -193,10 +185,7 @@ test_that(paste(
 # <https://github.com/stan-dev/projpred/pull/496#issuecomment-2481313265>), then
 # changed function name and added seed reset:
 test_that(".srs_diff_est_w() works as expected", {
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
-  set.seed(1234)
+  withr::local_seed(1234)
   N <- 1000
   y_true <- 1:N
   sigma_hat_true <- sqrt(N * sum((y_true - mean(y_true))^2) / length(y_true))
@@ -226,15 +215,11 @@ test_that(".srs_diff_est_w() works as expected", {
   expect_equal(res$y_hat, 500500, tol = 0.0001)
   expect_equal(res$v_y_hat, 0, tol = 0.0001)
   expect_equal(sqrt(res$hat_v_y), sigma_hat_true, tol = 0.1)
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
 })
 
 # Adapted from the test above:
 test_that(".srs_diff_est_w() works as expected with `wobs` not full of ones", {
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    rng_old <- get(".Random.seed", envir = .GlobalEnv)
-  }
-  set.seed(seed3_tst)
+  withr::local_seed(seed3_tst)
   N <- 1e3
   y_true <- seq_len(N)
   wobs <- sample(2:7, size = N, replace = TRUE)
@@ -277,13 +262,12 @@ test_that(".srs_diff_est_w() works as expected with `wobs` not full of ones", {
   expect_equal(res$y_hat, 500845, tol = 1e-4)
   expect_equal(res$v_y_hat, 0, tol = 1e-4)
   expect_equal(sqrt(res$hat_v_y), sigma_hat_true, tol = 1e-1)
-  if (exists("rng_old")) assign(".Random.seed", rng_old, envir = .GlobalEnv)
 })
 
 test_that(".srs_diff_est_w() propagates input `NA`s to its output", {
   nloo_tst <- nobsv %/% 5L
   loo_inds_tst <- ceiling(seq(1L, nobsv, length.out = nloo_tst))
-  skip_if_not(length(unique(loo_inds_tst)) == nloo_tst)
+  stopifnot(length(unique(loo_inds_tst)) == nloo_tst)
   srs_diff_res_NAs <- list(
     m = nloo_tst,
     N = nobsv,
@@ -468,4 +452,31 @@ test_that(".auc() propagates input `NA`s to its output", {
                   "`pred` column without `NA`s, ",
                   "`wobs` column only `NA`s")
   )
+})
+
+test_that("all_ia_perms() gives all orders of an interaction term", {
+  expect_identical(all_ia_perms("a"), "a")
+  expect_identical(all_ia_perms("b:a"), c("b:a", "a:b"))
+  expect_identical(
+    all_ia_perms("x2:x1:s(x3)"),
+    c("x2:x1:s(x3)", "x2:s(x3):x1", "x1:x2:s(x3)", "x1:s(x3):x2",
+      "s(x3):x2:x1", "s(x3):x1:x2")
+  )
+  expect_identical(all_ia_perms(c("b", "a"), is_split = TRUE),
+                   all_ia_perms("b:a"))
+  expect_identical(all_ia_perms(c("a", "a"), is_split = TRUE),
+                   c("a:a", "a:a"))
+  expect_identical(perm_idxs(0L), matrix(integer(0), nrow = 1L, ncol = 0L))
+  expect_identical(perm_idxs(1L), matrix(1L))
+  expect_identical(perm_idxs(3L),
+                   rbind(c(1L, 2L, 3L), c(1L, 3L, 2L), c(2L, 1L, 3L),
+                         c(2L, 3L, 1L), c(3L, 1L, 2L), c(3L, 2L, 1L)))
+  perms4 <- all_ia_perms("d:c:b:a")
+  expect_identical(perms4[c(1:3, 24)],
+                   c("d:c:b:a", "d:c:a:b", "d:b:c:a", "a:b:c:d"))
+  expect_length(perms4, 24)
+  expect_identical(anyDuplicated(perms4), 0L)
+  expect_identical(unique(vapply(strsplit(perms4, ":"), function(trms) {
+    paste(sort(trms), collapse = ":")
+  }, character(1))), "a:b:c:d")
 })

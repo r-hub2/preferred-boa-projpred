@@ -1,10 +1,39 @@
+# `return_outdmins = FALSE` tells the search that the caller does not use the
+# submodel fits along the ranking (element `outdmins`), so
+# search_forward_gauss() does not compute them. The draw-wise search computes
+# them anyway.
 search_forward <- function(p_ref, refmodel, nterms_max, verbose = TRUE,
                            search_terms, est_runtime = TRUE,
-                           search_terms_was_null, ...) {
+                           search_terms_was_null, return_outdmins = TRUE,
+                           search_screen = NULL, ...) {
   nterms_max_with_icpt <- nterms_max + 1L
   iq <- ceiling(quantile(seq_len(nterms_max_with_icpt), 1:10 / 10))
   if (is.null(search_terms)) {
     stop("Did not expect `search_terms` to be `NULL`. Please report this.")
+  }
+
+  # Gaussian submodels: rank the terms from cross-products (see
+  # search_forward_gauss()); `NULL` if this case does not apply:
+  if (getOption("projpred.search_gauss_crossprod", TRUE)) {
+    out_gauss <- search_forward_gauss(
+      p_ref = p_ref, refmodel = refmodel, nterms_max = nterms_max,
+      verbose = verbose, search_terms = search_terms,
+      return_outdmins = return_outdmins, ...
+    )
+    if (!is.null(out_gauss)) {
+      return(out_gauss)
+    }
+  }
+
+  # Score-screened search with fewer projections (see search_forward_fast());
+  # `NULL` if `search_screen` is `NULL` or a condition does not hold:
+  out_fast <- search_forward_fast(
+    p_ref = p_ref, refmodel = refmodel, nterms_max = nterms_max,
+    verbose = verbose, search_terms = search_terms,
+    search_screen = search_screen, ...
+  )
+  if (!is.null(out_fast)) {
+    return(out_fast)
   }
 
   chosen <- character()
@@ -12,7 +41,8 @@ search_forward <- function(p_ref, refmodel, nterms_max, verbose = TRUE,
 
   for (size in seq_len(nterms_max_with_icpt)) {
     # Determine candidate predictors for the current size:
-    cands <- select_possible_terms_size(chosen, search_terms, size = size)
+    cands <- select_possible_terms_size(chosen, search_terms, size = size,
+                                        use_term_info = TRUE)
     if (is.null(cands))
       next
     full_cands <- lapply(cands, function(cand) c(chosen, cand))
@@ -139,6 +169,294 @@ search_forward <- function(p_ref, refmodel, nterms_max, verbose = TRUE,
   # models. Thus, use `chosen` here because it matches `outdmins` (this
   # matching is necessary because later in perf_eval()'s `!refit_prj` case,
   # `outdmins` is indexed with integers which are based on `predictor_ranking`):
+  return(nlist(predictor_ranking = setdiff(chosen, "1"), outdmins))
+}
+
+# For search terms that are each "1" or have one term label (see
+# search_term_info()): the label of each term (`NA` for "1") and the string
+# that select_possible_terms_size() returns for it. Returns `NULL` in other
+# cases, or if the label of a returned string is not the label of its term.
+single_label_info <- function(term_info) {
+  if (is.null(term_info)) {
+    return(NULL)
+  }
+  is_single <- vapply(term_info, function(info) {
+    length(info$labels) <= 1L && !is.na(info$label_out)
+  }, logical(1))
+  if (!all(is_single)) {
+    return(NULL)
+  }
+  lab <- vapply(term_info, function(info) {
+    if (length(info$labels) == 1L) info$labels else NA_character_
+  }, character(1), USE.NAMES = FALSE)
+  out <- vapply(term_info, `[[`, character(1), "label_out",
+                USE.NAMES = FALSE)
+  lab_out <- lapply(out, labels_gauss)
+  if (!identical(lengths(lab_out), as.integer(!is.na(lab))) ||
+      !identical(as.character(unlist(lab_out)), lab[!is.na(lab)])) {
+    return(NULL)
+  }
+  return(list(lab = lab, out = out))
+}
+
+# The candidates of one search step for the output `single` of
+# single_label_info(): the result `cands` of select_possible_terms_size() and
+# the index `idx` of the search term of each candidate, without formula code.
+# The new term label of a candidate is `single$lab[idx]` (`NA`: no new label).
+# With one label per term, the size of a candidate is the number of chosen
+# labels, plus one for a new label, plus one for the intercept. `cands` is
+# `NULL` if no candidate has the size. Returns `NULL` if a candidate is a term
+# with a chosen label (select_possible_terms_size() builds a formula for it).
+# In a search, this does not occur: each step adds at most one label, so
+# after the intercept step, the number of chosen labels is at most `size - 2`.
+cands_single_label <- function(single, labels_chosen, size) {
+  in_chosen <- single$lab %in% labels_chosen
+  n_new <- as.integer(!is.na(single$lab) & !in_chosen)
+  is_valid <- n_new + length(labels_chosen) + 1L == size
+  if (any(is_valid & in_chosen)) {
+    return(NULL)
+  }
+  if (!any(is_valid)) {
+    return(list(cands = NULL, idx = NULL))
+  }
+  idx <- which(is_valid)
+  cands <- single$out[idx]
+  keep <- !duplicated(cands)
+  return(list(cands = cands[keep], idx = idx[keep]))
+}
+
+# Forward search for Gaussian submodels with the identity link, from the
+# cross-products of the model matrix of all search terms. Let J be the
+# model-matrix columns of a candidate. For draw s, the projection solves the
+# weighted ridge problem of glm_ridge():
+#   (G[J, J] + regul * diag(sd[J]^2)) beta_s = C[J, s].
+# Here, G = Xc' W Xc and C = Xc' W M. Xc is the model matrix, centered at the
+# weighted column means. W holds the observation weights, M the fitted values
+# of the projected reference draws, and sd the weighted column standard
+# deviations from .weighted_sd(). glm_ridge() centers and scales the columns
+# in the same way and does not penalize the intercept. The part of ce_gauss()
+# that differs between the candidates is
+#   -beta_s' (G[J, J] + 2 * regul * diag(sd[J]^2)) beta_s / sum(W).
+# Thus, the cost per candidate does not depend on the number of observations.
+# This function gives only the ranking. The submodel fits along the ranking come
+# from proj_to_submodl(), as in search_forward(). The function returns `NULL`
+# if one of its conditions does not hold; then search_forward() continues with
+# its own search.
+search_forward_gauss <- function(p_ref, refmodel, nterms_max, verbose,
+                                 search_terms, return_outdmins = TRUE, ...) {
+  # The arguments for the divergence minimizer, as in proj_to_submodl():
+  dot_args <- list(...)
+  divmin_args <- dot_args$search_control %||%
+    dot_args[setdiff(names(dot_args), "search_control")]
+  regul <- gauss_crossprod_regul(refmodel, divmin_args)
+  if (is.null(regul)) {
+    return(NULL)
+  }
+  # Custom search terms are possible, because the candidates come from
+  # select_possible_terms_size() (or cands_single_label(), which gives the same
+  # result), as in search_forward():
+  des <- gauss_crossprod_design(refmodel, search_terms, regul)
+  if (is.null(des)) {
+    return(NULL)
+  }
+  cols_by_term <- des$cols_by_term
+  # The weights scale the (small) model matrix, not the draws:
+  c_mat <- crossprod(des$x_cw, p_ref$mu)
+  lambda_x <- des$lambda_x
+  a_full <- des$a_full
+  wdraws <- p_ref$wdraws_prj
+
+  # The term labels of a candidate string. The same strings come back in every
+  # step, so the labels are computed once. `[[` and assign() make a symbol from
+  # the string, and a symbol has a limit of 10000 bytes, so long strings are
+  # not cached:
+  label_cache <- new.env(hash = TRUE, parent = emptyenv())
+  labels_of <- function(cand) {
+    if (nchar(cand, type = "bytes") >= 10000L) {
+      return(labels_gauss(cand))
+    }
+    lbls <- label_cache[[cand]]
+    if (is.null(lbls)) {
+      lbls <- labels_gauss(cand)
+      assign(cand, lbls, envir = label_cache)
+    }
+    return(lbls)
+  }
+
+  # The criterion is -sum_s wdraws_s * beta_s' (G[J, J] + 2 * Lambda) beta_s
+  # (smaller is better, as for the cross-entropy). With
+  # G[J, J] + Lambda = R' R and y_s = R^-T C[J, s], it equals
+  # -sum_s wdraws_s * (||y_s||^2 + beta_s' Lambda beta_s). In one step, all
+  # candidates share the columns of the chosen terms, so the Cholesky factor
+  # `r_chosen` and `y_chosen` of these columns are computed once per step. Each
+  # candidate extends them by its new columns `cols_new` (block Cholesky).
+  crit_cand <- function(cols_new, cols_chosen, r_chosen, y_chosen) {
+    quad <- 0
+    r_cn <- NULL
+    r_n <- NULL
+    y_n <- NULL
+    beta_n <- NULL
+    if (length(cols_new) > 0) {
+      a_nn <- a_full[cols_new, cols_new, drop = FALSE]
+      rhs_n <- c_mat[cols_new, , drop = FALSE]
+      if (length(cols_chosen) > 0) {
+        r_cn <- forwardsolve(t(r_chosen),
+                             a_full[cols_chosen, cols_new, drop = FALSE])
+        a_nn <- a_nn - crossprod(r_cn)
+        rhs_n <- rhs_n - crossprod(r_cn, y_chosen)
+      }
+      r_n <- tryCatch(chol(a_nn), error = function(e) NULL)
+      if (is.null(r_n)) {
+        return(list(crit = NA_real_))
+      }
+      y_n <- forwardsolve(t(r_n), rhs_n)
+      beta_n <- backsolve(r_n, y_n)
+      quad <- colSums(y_n^2) + colSums(lambda_x[cols_new] * beta_n^2)
+    }
+    if (length(cols_chosen) > 0) {
+      y_c <- y_chosen
+      if (!is.null(beta_n)) {
+        y_c <- y_c - r_cn %*% beta_n
+      }
+      beta_c <- backsolve(r_chosen, y_c)
+      quad <- quad + colSums(y_chosen^2) +
+        colSums(lambda_x[cols_chosen] * beta_c^2)
+    }
+    return(list(crit = -sum(wdraws * quad), r_cn = r_cn, r_n = r_n, y_n = y_n))
+  }
+
+  # crit_cand() for many candidates that each add one column (`cols_single`)
+  # at once, with matrix operations instead of one call per candidate. For
+  # candidate j, beta_c = b0 - u_j beta_n[j, ]' with b0 = R^-1 y_chosen and
+  # u_j = R^-1 r_cj, so the penalty term of the chosen columns is
+  # sum(lambda b0^2) - 2 beta_n[j, ] p[j, ] + beta_n[j, ]^2 l[j], with
+  # p = (u * lambda)' b0 and l = colSums(lambda u^2).
+  crit_single <- function(cols_single, cols_chosen, r_chosen, y_chosen) {
+    a_jj <- a_full[cbind(cols_single, cols_single)]
+    rhs <- c_mat[cols_single, , drop = FALSE]
+    if (length(cols_chosen) > 0) {
+      r_cj <- forwardsolve(t(r_chosen),
+                           a_full[cols_chosen, cols_single, drop = FALSE])
+      a_jj <- a_jj - colSums(r_cj^2)
+      rhs <- rhs - crossprod(r_cj, y_chosen)
+    }
+    if (!isTRUE(all(a_jj > 0))) {
+      return(rep(NA_real_, length(cols_single)))
+    }
+    y_n <- rhs / sqrt(a_jj)
+    beta_n <- y_n / sqrt(a_jj)
+    quad <- y_n^2 + lambda_x[cols_single] * beta_n^2
+    if (length(cols_chosen) > 0) {
+      lambda_c <- lambda_x[cols_chosen]
+      b0 <- backsolve(r_chosen, y_chosen)
+      u <- backsolve(r_chosen, r_cj)
+      q0 <- colSums(y_chosen^2) + colSums(lambda_c * b0^2)
+      quad <- quad +
+        matrix(q0, nrow = length(cols_single), ncol = length(q0), byrow = TRUE) -
+        2 * beta_n * crossprod(u * lambda_c, b0) +
+        colSums(lambda_c * u^2) * beta_n^2
+    }
+    return(-drop(quad %*% wdraws))
+  }
+
+  chosen <- character()
+  labels_chosen <- character()
+  cols_chosen <- integer(0)
+  r_chosen <- NULL
+  y_chosen <- NULL
+  term_info <- search_term_info(search_terms)
+  single <- single_label_info(term_info)
+  if (!is.null(single)) {
+    # The columns of each search term, looked up by name once for all steps:
+    # `integer(0)` for "1" (no label), `NULL` if the model matrix has no
+    # columns for the label.
+    cols_term <- unname(cols_by_term[single$lab])
+    cols_term[is.na(single$lab)] <- list(integer(0))
+    term_has_cols <- !vapply(cols_term, is.null, logical(1))
+  }
+  for (size in seq_len(nterms_max + 1L)) {
+    step <- NULL
+    if (!is.null(single)) {
+      step <- cands_single_label(single, labels_chosen, size)
+    }
+    if (!is.null(step)) {
+      cands <- step$cands
+      if (is.null(cands)) {
+        next
+      }
+      if (!all(term_has_cols[step$idx])) {
+        return(NULL)
+      }
+      cols_cands <- cols_term[step$idx]
+    } else {
+      cands <- select_possible_terms_size(chosen, search_terms, size = size,
+                                          use_term_info = TRUE)
+      if (is.null(cands)) {
+        next
+      }
+      labels_new <- lapply(cands, function(cand) {
+        setdiff(labels_of(cand), labels_chosen)
+      })
+      if (!all(unlist(labels_new) %in% names(cols_by_term))) {
+        return(NULL)
+      }
+      cols_cands <- lapply(labels_new, function(lbls) {
+        unlist(cols_by_term[lbls], use.names = FALSE)
+      })
+    }
+    crits <- rep(NA_real_, length(cands))
+    is_single <- lengths(cols_cands) == 1L
+    if (any(is_single)) {
+      crits[is_single] <- crit_single(unlist(cols_cands[is_single]),
+                                      cols_chosen, r_chosen, y_chosen)
+    }
+    for (k in which(!is_single)) {
+      crits[k] <- crit_cand(cols_cands[[k]], cols_chosen, r_chosen,
+                            y_chosen)$crit
+    }
+    # A numerically singular system (for example, collinear columns with a
+    # small `regul`) goes to the search of search_forward():
+    if (anyNA(crits)) {
+      return(NULL)
+    }
+    imin <- which.min(crits)
+    chosen <- c(chosen, cands[imin])
+    cols_new <- cols_cands[[imin]]
+    if (length(cols_new) > 0) {
+      # The factors of the chosen candidate, for the next step:
+      best <- crit_cand(cols_new, cols_chosen, r_chosen, y_chosen)
+      if (is.na(best$crit)) {
+        return(NULL)
+      }
+      if (length(cols_chosen) == 0) {
+        r_chosen <- best$r_n
+        y_chosen <- best$y_n
+      } else {
+        r_chosen <- rbind(
+          cbind(r_chosen, best$r_cn),
+          cbind(matrix(0, length(cols_new), length(cols_chosen)), best$r_n)
+        )
+        y_chosen <- rbind(y_chosen, best$y_n)
+      }
+      cols_chosen <- c(cols_chosen, cols_new)
+      label_new <- if (!is.null(step)) {
+        single$lab[step$idx[imin]]
+      } else {
+        labels_new[[imin]]
+      }
+      labels_chosen <- c(labels_chosen, label_new)
+    }
+  }
+
+  # The submodel fits along the ranking (as stored by search_forward()), if the
+  # caller uses them:
+  outdmins <- NULL
+  if (return_outdmins) {
+    outdmins <- lapply(seq_along(chosen), function(j) {
+      proj_to_submodl(predictor_terms = chosen[seq_len(j)], p_ref = p_ref,
+                      refmodel = refmodel, verbose = verbose, ...)$outdmin
+    })
+  }
   return(nlist(predictor_ranking = setdiff(chosen, "1"), outdmins))
 }
 
@@ -302,7 +620,11 @@ search_L1 <- function(p_ref, refmodel, nterms_max, penalty, search_control) {
          "full-model formula or `nterms_max = 0`.")
   }
   # Preparations:
-  fr <- model.frame(refmodel$formula, data = refmodel$fetch_data(),
+  # The model frame keeps the contrasts of the reference model, so the
+  # model.matrix() calls below use them:
+  fr <- model.frame(refmodel$formula,
+                    data = set_contrasts(refmodel$fetch_data(),
+                                         refmodel$contrasts),
                     drop.unused.levels = TRUE)
   da_classes <- attr(attr(fr, "terms"), "dataClasses")
   nms_chr_fac <- names(da_classes)[da_classes %in% c("character", "factor")]
@@ -315,12 +637,8 @@ search_L1 <- function(p_ref, refmodel, nterms_max, penalty, search_control) {
   } else {
     xlvls <- NULL
   }
-  # TODO: In the following model.matrix() call, allow user-specified contrasts
-  # to be passed to argument `contrasts.arg`. The `contrasts.arg` default
-  # (`NULL`) uses `options("contrasts")` internally, but it might be more
-  # convenient to let users specify contrasts directly. At that occasion,
-  # contrasts should also be tested thoroughly (not done until now).
   x <- model.matrix(refmodel$formula, data = fr)
+  contrasts_x <- attr(x, "contrasts")
   x <- x[, colnames(x) != "(Intercept)", drop = FALSE]
   ## it's important to keep the original order because that's the order
   ## in which lasso will estimate the parameters
@@ -383,12 +701,6 @@ search_L1 <- function(p_ref, refmodel, nterms_max, penalty, search_control) {
       variables <- unlist(lapply(
         predictor_ranking[seq_len(nterms)],
         function(term) {
-          # TODO: In the following model.matrix() call, allow user-specified
-          # contrasts to be passed to argument `contrasts.arg`. The
-          # `contrasts.arg` default (`NULL`) uses `options("contrasts")`
-          # internally, but it might be more convenient to let users specify
-          # contrasts directly. At that occasion, contrasts should also be
-          # tested thoroughly (not done until now).
           mm <- model.matrix(as.formula(paste("~ 1 +", term)), data = fr)
           return(setdiff(colnames(mm), "(Intercept)"))
         }
@@ -413,7 +725,8 @@ search_L1 <- function(p_ref, refmodel, nterms_max, penalty, search_control) {
     }
 
     sub <- nlist(alpha = search_path$alpha[nterms + 1], beta,
-                 w = search_path$w[, nterms + 1], formula, x, xlvls)
+                 w = search_path$w[, nterms + 1], formula, x, xlvls,
+                 terms = attr(fr, "terms"), contrasts = contrasts_x)
     class(sub) <- "subfit"
     return(list(sub))
   })
